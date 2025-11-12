@@ -301,7 +301,7 @@ if __name__ == "__main__":
             out_file = opts.o
         assert opts.f or not os.path.isfile(out_file), "File already exists! Try running with -f option to overwrite."
         start_t = time.time()
-        use_multiprocessing = True
+        use_multiprocessing = False
         executable = get_lkh_executable()
 
         def run_func(args):

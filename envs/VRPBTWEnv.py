@@ -186,10 +186,13 @@ class VRPBTWEnv:
         cloned.open = self.open.clone() if self.open is not None else None
         
         # === 4. HISTORY (OPTIONAL CLONE) ===
+        # History (optional clone - can be large!)
         if deep_clone_history:
-            cloned.selected_node_list = self.selected_node_list.clone() if self.selected_node_list is not None else None
+           cloned.selected_node_list = self.selected_node_list.clone() if self.selected_node_list is not None else None
         else:
-            cloned.selected_node_list = None
+            # ✅ SỬA (FIX): Khởi tạo là TENSOR RỖNG (EMPTY TENSOR),
+            # (Giống hệt dòng 249 trong hàm reset())
+            cloned.selected_node_list = torch.zeros((cloned.batch_size, cloned.pomo_size, 0), dtype=torch.long).to(cloned.device)
         
         # === 5. STATE OBJECTS (RECREATE) ===
         # Tái tạo dataclass step_state

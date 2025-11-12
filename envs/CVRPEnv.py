@@ -132,7 +132,15 @@ class CVRPEnv:
     
         # Hoặc Option B: Dùng __init__ bình thường
         # cloned = CVRPEnv(**self.env_params)
-    
+        # Gán các thuộc tính config (immutable)
+        cloned.env_params = self.env_params
+        cloned.problem = self.problem
+        cloned.problem_size = self.problem_size # (Thêm cho chắc chắn)
+        cloned.loc_scaler = self.loc_scaler # (Thêm cho chắc chắn)
+        cloned.device = self.device # (Thêm cho chắc chắn)
+
+        cloned.pomo_size = self.pomo_size
+
         # === 2. STATIC DATA (SHARED) ===
         cloned.batch_size = self.batch_size
         cloned.BATCH_IDX = self.BATCH_IDX  # Tensor, nhưng read-only nên OK
@@ -171,11 +179,9 @@ class CVRPEnv:
         if deep_clone_history:
            cloned.selected_node_list = self.selected_node_list.clone() if self.selected_node_list is not None else None
         else:
-          # Don't clone history to save memory
-          cloned.selected_node_list = None
-          # Or slice to current step:
-          # if self.selected_node_list is not None:
-          #     cloned.selected_node_list = self.selected_node_list[:, :, :self.selected_count].clone()
+            # ✅ SỬA (FIX): Khởi tạo là TENSOR RỖNG (EMPTY TENSOR),
+            # (Giống hệt dòng 249 trong hàm reset())
+            cloned.selected_node_list = torch.zeros((cloned.batch_size, cloned.pomo_size, 0), dtype=torch.long).to(cloned.device)
     
         # === 4. STATE OBJECTS (RECREATE) ===
         cloned.step_state = Step_State()
@@ -223,11 +229,15 @@ class CVRPEnv:
         self.reset_state.node_tw_start = torch.zeros(self.batch_size, self.problem_size).to(self.device)
         self.reset_state.node_tw_end = torch.zeros(self.batch_size, self.problem_size).to(self.device)
         self.reset_state.prob_emb = torch.FloatTensor([1, 0, 0, 0, 0]).unsqueeze(0).to(self.device)  # bit vector for [C, O, B, L, TW]
+        
+        # BƯỚC 1: GÁN CHO THUỘC TÍNH CỦA CLASS
+        self.START_NODE = torch.arange(start=1, end=self.problem_size+1)[None, :].expand(self.batch_size, -1).to(self.device)
+        self.START_NODE = self.START_NODE[node_demand > 0].reshape(self.batch_size, -1)[:, :self.pomo_size]
 
         self.step_state.BATCH_IDX = self.BATCH_IDX
         self.step_state.POMO_IDX = self.POMO_IDX
         self.step_state.open = torch.zeros(self.batch_size, self.pomo_size).to(self.device)
-        self.step_state.START_NODE = torch.arange(start=1, end=self.pomo_size+1)[None, :].expand(self.batch_size, -1).to(self.device)
+        self.step_state.START_NODE = self.START_NODE
         self.step_state.PROBLEM = self.problem
 
     def reset(self):

@@ -2,6 +2,7 @@ import os, sys
 import time
 import argparse
 import numpy as np
+import shutil
 from datetime import timedelta
 from functools import partial
 from six.moves import xrange
@@ -426,4 +427,8 @@ if __name__ == '__main__':
         results = [(i[0], i[1]) for i in results]
         save_dataset(results, out_file)  # [(obj, route), ...]
 
-        os.system("rm -rf {}".format(target_dir))
+        try:
+           shutil.rmtree(target_dir)
+           print(f">> Cleaned up temp dir: {target_dir}")
+        except OSError as e:
+           print(f"Error cleaning up temp dir {target_dir}: {e}")

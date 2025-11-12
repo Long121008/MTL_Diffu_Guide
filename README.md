@@ -37,7 +37,7 @@ The PyTorch Implementation of *ICML 2024 -- [MVMoE: Multi-Task Vehicle Routing S
 python train.py --problem={PROBLEM} --model_type=SINGLE
 
 # 1. POMO-MTL
-python train.py --problem=Train_ALL --model_type=MTL
+python train.py --problem=Train_ALL --model_type=MTL --use_diffusion_guidance --enable_slot_reconstruction
 
 # 2. MVMoE/4E 
 python train.py --problem=Train_ALL --model_type=MOE --num_experts=4 --routing_level=node --routing_method=input_choice

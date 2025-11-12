@@ -171,10 +171,13 @@ class VRPLEnv:
         cloned.open = self.open.clone() if self.open is not None else None
         
         # === 4. HISTORY (OPTIONAL CLONE) ===
+        # History (optional clone - can be large!)
         if deep_clone_history:
-            cloned.selected_node_list = self.selected_node_list.clone() if self.selected_node_list is not None else None
+           cloned.selected_node_list = self.selected_node_list.clone() if self.selected_node_list is not None else None
         else:
-            cloned.selected_node_list = None
+            # ✅ SỬA (FIX): Khởi tạo là TENSOR RỖNG (EMPTY TENSOR),
+            # (Giống hệt dòng 249 trong hàm reset())
+            cloned.selected_node_list = torch.zeros((cloned.batch_size, cloned.pomo_size, 0), dtype=torch.long).to(cloned.device)
         
         # === 5. STATE OBJECTS (RECREATE) ===
         # Tái tạo dataclass step_state
@@ -227,11 +230,15 @@ class VRPLEnv:
         self.reset_state.node_tw_start = torch.zeros(self.batch_size, self.problem_size).to(self.device)
         self.reset_state.node_tw_end = torch.zeros(self.batch_size, self.problem_size).to(self.device)
         self.reset_state.prob_emb = torch.FloatTensor([1, 0, 0, 1, 0]).unsqueeze(0).to(self.device)  # bit vector for [C, O, B, L, TW]
+        
+        # BƯỚC 1: GÁN CHO THUỘC TÍNH CỦA CLASS
+        self.START_NODE = torch.arange(start=1, end=self.problem_size+1)[None, :].expand(self.batch_size, -1).to(self.device)
+        self.START_NODE = self.START_NODE[node_demand > 0].reshape(self.batch_size, -1)[:, :self.pomo_size]
 
         self.step_state.BATCH_IDX = self.BATCH_IDX
         self.step_state.POMO_IDX = self.POMO_IDX
         self.step_state.open = torch.zeros(self.batch_size, self.pomo_size).to(self.device)
-        self.step_state.START_NODE = torch.arange(start=1, end=self.pomo_size + 1)[None, :].expand(self.batch_size, -1).to(self.device)
+        self.step_state.START_NODE = self.START_NODE
         self.step_state.PROBLEM = self.problem
 
     def reset(self):
