@@ -17,7 +17,7 @@ class Tester:
         # ENV, MODEL, & Load checkpoint
         self.envs = get_env(self.args.problem)  # Env Class
         self.device = args.device
-        self.checkpoint = torch.load(args.checkpoint, map_location=self.device)
+        self.checkpoint = torch.load(args.checkpoint, map_location=self.device, weights_only=False)
         self.model_params['problem'] = self.checkpoint['problem']  # training problem of the checkpoint
         self.model = get_model(self.args.model_type)(**self.model_params)
         self.fine_tune_model = get_model(self.args.model_type)(**self.model_params)

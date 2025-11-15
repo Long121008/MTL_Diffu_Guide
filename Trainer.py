@@ -49,7 +49,7 @@ class Trainer:
         self.start_epoch = 1
         if args.checkpoint is not None:
             checkpoint_fullname = args.checkpoint
-            checkpoint = torch.load(checkpoint_fullname, map_location=self.device)
+            checkpoint = torch.load(checkpoint_fullname, map_location=self.device, weights_only=False)
             self.model.load_state_dict(checkpoint['model_state_dict'], strict=True)
             self.start_epoch = 1 + checkpoint['epoch']
             self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])

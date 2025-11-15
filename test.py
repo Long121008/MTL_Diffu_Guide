@@ -89,8 +89,7 @@ if __name__ == "__main__":
     # =========================================================================
     # MODEL PARAMS (MUST MATCH TRAINING CONFIG!)
     # =========================================================================
-    parser.add_argument('--model_type', type=str, default="MOE_LIGHT", 
-                        choices=["SINGLE", "MTL", "MOE", "MOE_LIGHT"])
+    parser.add_argument('--model_type', type=str, default="SlotDiff", choices=["MOE_LIGHT_Mixed", "MOE_Mixed", "MTL_Mixed","SINGLE", "MTL", "MOE", "MOE_LIGHT", "SlotDiffModel", "SlotModel"])
     
     # Basic Architecture
     parser.add_argument('--embedding_dim', type=int, default=128)

@@ -97,8 +97,7 @@ if __name__ == "__main__":
     # =========================================================================
     # MODEL PARAMS
     # =========================================================================
-    parser.add_argument('--model_type', type=str, default="MOE_LIGHT", 
-                        choices=["SINGLE", "MTL", "MOE", "MOE_LIGHT"])
+    parser.add_argument('--model_type', type=str, default="SlotDiff", choices=["MOE_LIGHT_Mixed", "MOE_Mixed", "MTL_Mixed","SINGLE", "MTL", "MOE", "MOE_LIGHT", "SlotDiffModel", "SlotModel"])
     
     # Basic Architecture
     parser.add_argument('--embedding_dim', type=int, default=128)
@@ -171,13 +170,13 @@ if __name__ == "__main__":
     # =========================================================================
     # TRAINER PARAMS
     # =========================================================================
-    parser.add_argument('--epochs', type=int, default=100, 
+    parser.add_argument('--epochs', type=int, default=5000, 
                         help="total training epochs")
     parser.add_argument('--train_episodes', type=int, default=10000 * 2, 
                         help="the num. of training instances per epoch")
-    parser.add_argument('--train_batch_size', type=int, default=32)
-    parser.add_argument('--validation_interval', type=int, default=100)
-    parser.add_argument('--model_save_interval', type=int, default=10)
+    parser.add_argument('--train_batch_size', type=int, default=512)
+    parser.add_argument('--validation_interval', type=int, default=5000)
+    parser.add_argument('--model_save_interval', type=int, default=1000)
     parser.add_argument('--checkpoint', type=str, default=None, 
                         help="resume training")
     

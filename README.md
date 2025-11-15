@@ -57,7 +57,7 @@ python train.py --problem=Train_ALL --model_type=MOE_LIGHT --num_experts=4 --rou
 python test.py --problem={PROBLEM} --model_type=SINGLE --checkpoint={MODEL_PATH}
 
 # 1. POMO-MTL
-python test.py --problem=ALL --model_type=MTL --enable_slot_diffusion --checkpoint="d:\MTL\MTL_Diffu_Guide\results\20251113_073904\epoch-100.pt"
+python test.py --problem=ALL --model_type=MTL --enable_slot_diffusion --checkpoint="d:\Routing-MVMoE\Trained Model\SlotDIff\epoch-500.pt"
 
 # 2. MVMoE/4E
 python test.py --problem=ALL --model_type=MOE --num_experts=4 --routing_level=node --routing_method=input_choice --checkpoint={MODEL_PATH}
