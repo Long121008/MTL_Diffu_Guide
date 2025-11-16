@@ -37,13 +37,15 @@ python train.py \
     --model_type=MTL \
     --epochs=5000 \
     --enable_slot_diffusion \
+    --occ_gpu=0.9 \
     --checkpoint="./pretrained/SlotDIff/epoch-500.pt"
 
 
 python train.py \
     --problem=Train_ALL \
     --model_type=MOE_Mixed \
-    --epochs=5000 \ 
+    --epochs=5000 \
+    --occ_gpu=0.9 \
     --checkpoint="./pretrained/MixedMOE/epoch-500.pt"
 
 
