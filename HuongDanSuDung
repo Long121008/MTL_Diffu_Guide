@@ -1,0 +1,5 @@
+Bước 1: Chạy: git clone --branch slottdiff_restruct --single-branch https://github.com/Long121008/MTL_Diffu_Guide.git
+
+Bước 2: Chạy: 1_setup_env.sh
+
+Bước 3: Chạy: 2_train.sh
