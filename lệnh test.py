@@ -11,3 +11,5 @@ python LKH_baseline.py --problem=CVRP --datasets="c:/Users/HC COMPUTER/Prj_MTL/R
 results/20251111_211024/epoch-60.pt
 
 python test.py --problem=CVRP --model_type=MTL --checkpoint="results/20251105_133802/epoch-60.pt"
+
+python test.py --problem=CVRP --model_type=MOE_Mixed --checkpoint="./pretrained/MixedMOE/epoch-500.pt"

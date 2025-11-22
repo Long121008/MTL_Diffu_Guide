@@ -9,3 +9,4 @@ from .MOEModel_Mixed import *
 from .MOEModel_Light_Mixed import *
 from .SlotDiffModel import *
 from .SlotModel import *
+from .SlotDiffMOEModel import *

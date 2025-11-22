@@ -121,7 +121,7 @@ def get_env(problem):
 
 
 def get_model(model_type):
-    from models import SINGLEModel, MOEModel, MOEModel_Light, MTLModel, MTLModel_Mixed, MOEModel_Mixed, MOEModel_Light_Mixed, SlotDiffModel, SlotModel
+    from models import SINGLEModel, MOEModel, MOEModel_Light, MTLModel, MTLModel_Mixed, MOEModel_Mixed, MOEModel_Light_Mixed, SlotDiffModel, SlotModel, SlotDiffMOEModel
     if model_type == "MTL":
         return MTLModel
     elif model_type == "MOE":
@@ -140,6 +140,8 @@ def get_model(model_type):
         return SlotDiffModel
     elif model_type == "SlotModel":
         return SlotModel
+    elif model_type == "SlotDiffMOEModel":
+        return SlotDiffMOEModel
     else:
         return NotImplementedError
 

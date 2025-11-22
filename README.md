@@ -44,6 +44,9 @@ python train.py --problem=Train_ALL --model_type=MOE --num_experts=4 --routing_l
 
 # 3. MVMoE/4E-L
 python train.py --problem=Train_ALL --model_type=MOE_LIGHT --num_experts=4 --routing_level=node --routing_method=input_choice
+
+#4. SlotDiffMOE
+python train.py --problem=Train_ALL --model_type=SlotDiffMOEModel --num_experts=4 --routing_level=node --routing_method=input_choice
 ```
 
 </details>
@@ -60,7 +63,7 @@ python test.py --problem={PROBLEM} --model_type=SINGLE --checkpoint={MODEL_PATH}
 python test.py --problem=ALL --model_type=MTL --enable_slot_diffusion --checkpoint="d:\Routing-MVMoE\Trained Model\SlotDIff\epoch-500.pt"
 
 # 2. MVMoE/4E
-python test.py --problem=ALL --model_type=MOE --num_experts=4 --routing_level=node --routing_method=input_choice --checkpoint={MODEL_PATH}
+python test.py --problem=ALL --model_type=MOE --num_experts=4 --routing_level=node --routing_method=input_choice --checkpoint="D:\MTL\MTL_Diffu_Guide\pretrained\mvmoe_4e_n50\epoch-5000.pt"
 
 # 3. MVMoE/4E-L
 python test.py --problem=ALL --model_type=MOE_LIGHT --num_experts=4 --routing_level=node --routing_method=input_choice --checkpoint={MODEL_PATH}

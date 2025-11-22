@@ -97,7 +97,7 @@ if __name__ == "__main__":
     # =========================================================================
     # MODEL PARAMS
     # =========================================================================
-    parser.add_argument('--model_type', type=str, default="SlotDiff", choices=["MOE_LIGHT_Mixed", "MOE_Mixed", "MTL_Mixed","SINGLE", "MTL", "MOE", "MOE_LIGHT", "SlotDiffModel", "SlotModel"])
+    parser.add_argument('--model_type', type=str, default="SlotDiff", choices=["MOE_LIGHT_Mixed", "MOE_Mixed", "MTL_Mixed","SINGLE", "MTL", "MOE", "MOE_LIGHT", "SlotDiffModel", "SlotModel", "SlotDiffMOEModel"])
     
     # Basic Architecture
     parser.add_argument('--embedding_dim', type=int, default=128)

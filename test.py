@@ -89,7 +89,7 @@ if __name__ == "__main__":
     # =========================================================================
     # MODEL PARAMS (MUST MATCH TRAINING CONFIG!)
     # =========================================================================
-    parser.add_argument('--model_type', type=str, default="SlotDiff", choices=["MOE_LIGHT_Mixed", "MOE_Mixed", "MTL_Mixed","SINGLE", "MTL", "MOE", "MOE_LIGHT", "SlotDiffModel", "SlotModel"])
+    parser.add_argument('--model_type', type=str, default="SlotDiff", choices=["MOE_LIGHT_Mixed", "MOE_Mixed", "MTL_Mixed","SINGLE", "MTL", "MOE", "MOE_LIGHT", "SlotDiffModel", "SlotModel", "SlotDiffMOEModel"])
     
     # Basic Architecture
     parser.add_argument('--embedding_dim', type=int, default=128)
@@ -229,7 +229,7 @@ if __name__ == "__main__":
     
     # Load checkpoint to check configuration
     print(f"\n>> Loading checkpoint: {args.checkpoint}")
-    checkpoint = torch.load(args.checkpoint, map_location='cpu')
+    checkpoint = torch.load(args.checkpoint, map_location='cpu',weights_only=False)
     
     if 'epoch' in checkpoint:
         print(f">> Checkpoint Info:")
