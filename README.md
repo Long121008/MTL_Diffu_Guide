@@ -46,7 +46,7 @@ python train.py --problem=Train_ALL --model_type=MOE --num_experts=4 --routing_l
 python train.py --problem=Train_ALL --model_type=MOE_LIGHT --num_experts=4 --routing_level=node --routing_method=input_choice
 
 #4. SlotDiffMOE
-python train.py --problem=Train_ALL --model_type=SlotDiffMOEModel --num_experts=4 --routing_level=node --routing_method=input_choice --train_batch_size=32 --enable_slot_diffusion
+python train.py --problem=Train_ALL --model_type=SlotDiffMOEModel --num_experts=4 --routing_level=node --routing_method=input_choice --enable_slot_diffusion
 ```
 
 </details>
