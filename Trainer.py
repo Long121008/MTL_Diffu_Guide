@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import random
 from torch.optim import Adam as Optimizer
 from torch.optim.lr_scheduler import MultiStepLR as Scheduler
+import csv
 
 from utils import *
 
@@ -58,6 +59,10 @@ class Trainer:
 
         # utility
         self.time_estimator = TimeEstimator()
+        
+        self.train_log_file = open(f"{self.log_path}/train_log.csv", 'w', newline='')
+        self.train_logger = csv.writer(self.train_log_file)
+        self.train_logger.writerow(['epoch', 'score', 'loss'])
 
     def run(self):
         self.time_estimator.reset(self.start_epoch)
@@ -109,7 +114,8 @@ class Trainer:
         # Log Once, for each epoch
         print('Epoch {:3d}: Train ({:3.0f}%)  Score: {:.4f},  Loss: {:.4f}'.format(
             epoch, 100. * episode / train_num_episode, score_AM.avg, loss_AM.avg))
-
+        self.train_logger.writerow([epoch, score_AM.avg, loss_AM.avg])
+        self.train_log_file.flush()
         return score_AM.avg, loss_AM.avg
 
     def _train_one_batch(self, data, env):
