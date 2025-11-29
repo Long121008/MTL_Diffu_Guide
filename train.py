@@ -174,7 +174,7 @@ if __name__ == "__main__":
                         help="total training epochs")
     parser.add_argument('--train_episodes', type=int, default=10000 * 2, 
                         help="the num. of training instances per epoch")
-    parser.add_argument('--train_batch_size', type=int, default=512)
+    parser.add_argument('--train_batch_size', type=int, default=128)
     parser.add_argument('--validation_interval', type=int, default=5000)
     parser.add_argument('--model_save_interval', type=int, default=100)
     parser.add_argument('--checkpoint', type=str, default=None, 
