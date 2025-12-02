@@ -183,7 +183,7 @@ if __name__ == "__main__":
     # =========================================================================
     parser.add_argument('--seed', type=int, default=2024)
     parser.add_argument('--no_cuda', action='store_true')
-    parser.add_argument('--gpu_id', type=int, default=0)
+    parser.add_argument('--gpu_id', type=int, default=1)
     parser.add_argument('--occ_gpu', type=float, default=0., 
                         help="occumpy (X)% GPU memory in advance, please use sparingly.")
 
