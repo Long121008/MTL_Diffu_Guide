@@ -182,6 +182,7 @@ if __name__ == "__main__":
     # SETTINGS (GPU, SEED, etc.)
     # =========================================================================
     parser.add_argument('--seed', type=int, default=2024)
+    parser.add_argument('--log_dir', type=str, default="./results/test")
     parser.add_argument('--no_cuda', action='store_true')
     parser.add_argument('--gpu_id', type=int, default=1)
     parser.add_argument('--occ_gpu', type=float, default=0., 
@@ -208,6 +209,12 @@ if __name__ == "__main__":
     # =========================================================================
     # SETUP GPU
     # =========================================================================
+    process_start_time = datetime.now(pytz.timezone("Asia/Singapore"))
+    args.log_path = os.path.join(args.log_dir, process_start_time.strftime("%Y%m%d_%H%M%S"))
+    print(">> Log Path: {}".format(args.log_path))
+    
+    if not os.path.exists(args.log_path):
+        os.makedirs(args.log_path)
     if not args.no_cuda and torch.cuda.is_available():
         occumpy_mem(args) if args.occ_gpu != 0. else print(">> No occupation needed")
         args.device = torch.device('cuda', args.gpu_id)
