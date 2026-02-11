@@ -2,6 +2,7 @@ import re
 import torch
 import torch.nn.functional as F
 import random
+import os  # <--- [QUAN TRỌNG] Phải có import os
 from torch.optim import Adam as Optimizer
 from torch.optim.lr_scheduler import MultiStepLR as Scheduler
 
@@ -20,9 +21,8 @@ class Trainer:
         # ========================================
         # LOSS WEIGHTS CONFIGURATION
         # ========================================
-        # Lambda cho các auxiliary losses
         self.lambda_diffusion = trainer_params.get('lambda_diffusion', 0.1)
-        self.lambda_recon = trainer_params.get('lambda_recon', 0.0)  # Legacy recon (thường tắt)
+        self.lambda_recon = trainer_params.get('lambda_recon', 0.0)
         self.lambda_contrastive = trainer_params.get('lambda_contrastive', 0.01)
         
         # Log cấu hình loss
@@ -37,6 +37,9 @@ class Trainer:
         self.device = args.device
         self.log_path = args.log_path
         self.result_log = {"val_score": [], "val_gap": []}
+
+        # Lưu lịch sử loss: Total, RL, Diffusion, Contrastive
+        self.loss_log = {"total": [], "rl": [], "diffusion": [], "contrastive": []}
 
         # Main Components
         self.envs = get_env(self.args.problem)
@@ -61,12 +64,28 @@ class Trainer:
 
     def run(self):
         self.time_estimator.reset(self.start_epoch)
+        
+        # [MỚI] Tạo file log CSV
+        log_file_path = os.path.join(self.log_path, 'loss_history.csv')
+        if self.start_epoch == 1:
+            with open(log_file_path, 'w') as f:
+                f.write('Epoch,Total_Loss,RL_Loss,Diffusion_Loss,Contrastive_Loss,Score\n')
+
+        # [QUAN TRỌNG] Chỉ giữ lại MỘT vòng lặp chính
         for epoch in range(self.start_epoch, self.trainer_params['epochs']+1):
             print('=================================================================')
 
-            # Train
-            train_score, train_loss = self._train_one_epoch(epoch)
+            # Train (Nhận về 3 giá trị: score, loss, và details)
+            train_score, train_loss, details = self._train_one_epoch(epoch)
             self.scheduler.step()
+
+            # [MỚI] Ghi vào file CSV
+            with open(log_file_path, 'a') as f:
+                rl = details.get('rl', 0)
+                diff = details.get('diffusion', 0)
+                contra = details.get('contrastive', 0)
+                log_line = f"{epoch},{train_loss:.5f},{rl:.5f},{diff:.5f},{contra:.5f},{train_score:.5f}\n"
+                f.write(log_line)
 
             # Logs & Checkpoint
             elapsed_time_str, remain_time_str = self.time_estimator.get_est_string(epoch, self.trainer_params['epochs'])
@@ -84,7 +103,8 @@ class Trainer:
                     'model_state_dict': self.model.state_dict(),
                     'optimizer_state_dict': self.optimizer.state_dict(),
                     'scheduler_state_dict': self.scheduler.state_dict(),
-                    'result_log': self.result_log
+                    'result_log': self.result_log,
+                    'loss_log': self.loss_log  # Lưu loss log vào file .pt
                 }
                 torch.save(checkpoint_dict, '{}/epoch-{}.pt'.format(self.log_path, epoch))
 
@@ -93,126 +113,128 @@ class Trainer:
         score_AM, loss_AM = AverageMeter(), AverageMeter()
         train_num_episode = self.trainer_params['train_episodes']
 
+        # Tạo các bộ đo trung bình cho từng loại loss
+        avg_meters = {
+            "rl": AverageMeter(),
+            "diffusion": AverageMeter(),
+            "contrastive": AverageMeter()
+        }
+
         while episode < train_num_episode:
             remaining = train_num_episode - episode
             batch_size = min(self.trainer_params['train_batch_size'], remaining)
 
-            # Chọn ngẫu nhiên một môi trường để huấn luyện (MTL setup)
             env = random.sample(self.envs, 1)[0](**self.env_params)
             data = env.get_random_problems(batch_size, self.env_params["problem_size"])
-            avg_score, avg_loss = self._train_one_batch(data, env)
+            
+            # CHECK DATA FINGERPRINT
+            if epoch == self.start_epoch and episode == 0:
+                checksum = sum(t.sum() for t in data)
+                depot_xy = data[0]
+                print(f"\n{'='*40}")
+                print(f">> [DATA CHECK] Epoch {epoch} - Batch 0")
+                print(f">> Problem Type: {env.problem}")
+                print(f">> CHECKSUM (Dấu vân tay): {checksum.item():.6f}")
+                print(f">> Depot[0] coords: {depot_xy[0].cpu().numpy().tolist()}")
+                print(f"{'='*40}\n")
+            
+            # Train batch & nhận dictionary loss chi tiết
+            avg_score, avg_total_loss, loss_dict_batch = self._train_one_batch(data, env)
             
             score_AM.update(avg_score, batch_size)
-            loss_AM.update(avg_loss, batch_size)
+            loss_AM.update(avg_total_loss, batch_size)
+            
+            # Cập nhật các loss phụ
+            for k, v in loss_dict_batch.items():
+                if k in avg_meters:
+                    avg_meters[k].update(v, batch_size)
+            
             episode += batch_size
 
-        # Log Once, for each epoch
+        # Cập nhật log tổng
+        self.loss_log["total"].append(loss_AM.avg)
+        self.loss_log["rl"].append(avg_meters["rl"].avg)
+        self.loss_log["diffusion"].append(avg_meters["diffusion"].avg)
+        self.loss_log["contrastive"].append(avg_meters["contrastive"].avg)
+
         print('Epoch {:3d}: Train ({:3.0f}%)  Score: {:.4f},  Loss: {:.4f}'.format(
             epoch, 100. * episode / train_num_episode, score_AM.avg, loss_AM.avg))
 
-        return score_AM.avg, loss_AM.avg
+        # [QUAN TRỌNG] Trả về thêm dictionary chi tiết để hàm run() dùng
+        return score_AM.avg, loss_AM.avg, {
+            "rl": avg_meters["rl"].avg,
+            "diffusion": avg_meters["diffusion"].avg,
+            "contrastive": avg_meters["contrastive"].avg
+        }
 
     def _train_one_batch(self, data, env):
         self.model.train()
         self.model.set_eval_type(self.model_params["eval_type"])
         batch_size = data.size(0) if isinstance(data, torch.Tensor) else data[-1].size(0)
         
-        # ========================================
-        # PREP: Load problems và pre_forward
-        # ========================================
         env.load_problems(batch_size, problems=data, aug_factor=1)
         reset_state, _, _ = env.reset()
-        self.model.pre_forward(reset_state)  # Tính toán slots & original_features
+        self.model.pre_forward(reset_state)
         
         prob_list = torch.zeros(size=(batch_size, env.pomo_size, 0), device=self.device)
 
-        # ========================================
-        # POMO ROLLOUT (Nhánh 1: VRP Policy)
-        # ========================================
         state, reward, done = env.pre_step()
         while not done:
             selected, prob = self.model(state)
             state, reward, done = env.step(selected)
             prob_list = torch.cat((prob_list, prob[:, :, None]), dim=2)
 
-        # ========================================
-        # LOSS COMPUTATION
-        # ========================================
-        loss_dict = {}  # Để tracking từng loss component
+        loss_dict = {}
         
-        # 1. REINFORCE Loss (RL Loss) - Nhánh 1
+        # 1. RL Loss
         advantage = reward - reward.float().mean(dim=1, keepdims=True)
         log_prob = prob_list.log().sum(dim=2)
         rl_loss = -advantage * log_prob
         rl_loss_mean = rl_loss.mean()
         loss_dict['rl'] = rl_loss_mean.item()
 
-        # Score cho logging
-        max_pomo_reward, _ = reward.max(dim=1)
-        score_mean = -max_pomo_reward.float().mean()
-
-        # Total loss bắt đầu với RL loss
+        score_mean = -reward.max(dim=1)[0].float().mean()
         total_loss = rl_loss_mean
 
-        # ========================================
-        # 2. SLOT DIFFUSION LOSS - Nhánh 2 (MỚI!)
-        # ========================================
+        # 2. Diffusion Loss
         if self.lambda_diffusion > 0.0:
             try:
                 diffusion_loss = self.model.compute_slot_diffusion_loss()
                 total_loss = total_loss + self.lambda_diffusion * diffusion_loss
                 loss_dict['diffusion'] = diffusion_loss.item()
             except Exception as e:
-                print(f" [Warning: Diffusion loss failed: {e}]", end="")
                 loss_dict['diffusion'] = 0.0
 
-        # ========================================
-        # 3. SLOT RECONSTRUCTION LOSS (Legacy, optional)
-        # ========================================
+        # 3. Recon Loss
         if self.lambda_recon > 0.0:
             try:
                 recon_loss = self.model.compute_slot_reconstruction_loss(reset_state)
                 total_loss = total_loss + self.lambda_recon * recon_loss
                 loss_dict['recon'] = recon_loss.item()
             except Exception as e:
-                print(f" [Warning: Recon loss failed: {e}]", end="")
                 loss_dict['recon'] = 0.0
 
-        # ========================================
-        # 4. SLOT CONTRASTIVE LOSS
-        # ========================================
+        # 4. Contrastive Loss
         if self.lambda_contrastive > 0.0:
             try:
                 contrastive_loss = self.model.compute_slot_contrastive_loss()
                 total_loss = total_loss + self.lambda_contrastive * contrastive_loss
                 loss_dict['contrastive'] = contrastive_loss.item()
             except Exception as e:
-                print(f" [Warning: Contrastive loss failed: {e}]", end="")
                 loss_dict['contrastive'] = 0.0
 
-        # ========================================
-        # 5. AUX LOSS (MoE Load Balancing, nếu có)
-        # ========================================
         if hasattr(self.model, "aux_loss"):
             total_loss = total_loss + self.model.aux_loss
             loss_dict['aux'] = self.model.aux_loss.item()
 
-        # ========================================
-        # BACKWARD & OPTIMIZE
-        # ========================================
         self.model.zero_grad()
         total_loss.backward()
         self.optimizer.step()
 
-        # ========================================
-        # LOGGING (Chi tiết loss components)
-        # ========================================
-        #loss_str = " | ".join([f"{k}: {v:.4f}" for k, v in loss_dict.items() if v > 0])
-        #print(f" [{loss_str}]", end="")
-
-        return score_mean.item(), total_loss.item()
+        return score_mean.item(), total_loss.item(), loss_dict
 
     def _val_one_batch(self, data, env, aug_factor=1, eval_type="argmax"):
+        # (Giữ nguyên như cũ)
         self.model.eval()
         self.model.set_eval_type(eval_type)
         batch_size = data.size(0) if isinstance(data, torch.Tensor) else data[-1].size(0)
@@ -227,7 +249,6 @@ class Trainer:
                 selected, _ = self.model(state)
                 state, reward, done = env.step(selected)
 
-        # Return
         aug_reward = reward.reshape(aug_factor, batch_size, env.pomo_size)
         max_pomo_reward, _ = aug_reward.max(dim=2)
         no_aug_score = -max_pomo_reward[0, :].float()
@@ -237,6 +258,7 @@ class Trainer:
         return no_aug_score, aug_score
 
     def _val_and_stat(self, dir, val_path, env, batch_size=500, val_episodes=1000, compute_gap=False):
+        # (Giữ nguyên như cũ)
         no_aug_score_list, aug_score_list, no_aug_gap_list, aug_gap_list = [], [], [], []
         episode, no_aug_score, aug_score = 0, torch.zeros(0).to(self.device), torch.zeros(0).to(self.device)
 

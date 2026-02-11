@@ -45,8 +45,10 @@ python train.py --problem=Train_ALL --model_type=MOE --num_experts=4 --routing_l
 # 3. MVMoE/4E-L
 python train.py --problem=Train_ALL --model_type=MOE_LIGHT --num_experts=4 --routing_level=node --routing_method=input_choice
 
+python train.py --problem=Train_ALL --model_type=SlotDiffModel --train_batch_size=32 --enable_slot_diffusion
+
 #4. SlotDiffMOE
-python train.py --problem=Train_ALL --model_type=SlotDiffMOEModel --num_experts=4 --routing_level=node --routing_method=input_choice
+python train.py --problem=Train_ALL --model_type=SlotDiffMOEModel --num_experts=4 --routing_level=node --routing_method=input_choice --train_batch_size=32 --enable_slot_diffusion
 ```
 
 </details>
@@ -67,6 +69,15 @@ python test.py --problem=ALL --model_type=MOE --num_experts=4 --routing_level=no
 
 # 3. MVMoE/4E-L
 python test.py --problem=ALL --model_type=MOE_LIGHT --num_experts=4 --routing_level=node --routing_method=input_choice --checkpoint={MODEL_PATH}
+
+#4.SlotDiffModel
+python test.py --problem=ALL --model_type=SlotDiffModel --enable_slot_diffusion --checkpoint="./pretrained/SlotDIff/epoch-5000.pt"
+
+# 4. MixedMOE
+python test.py --problem=ALL --model_type=MOE_Mixed --num_experts=4 --routing_level=node --routing_method=input_choice --checkpoint="./pretrained/MixedMOE/epoch-1000.pt"
+
+# 4. SlotDiffMOE
+python test.py --problem=ALL --model_type=SlotDiffMOEModel --num_experts=4 --routing_level=node --routing_method=input_choice --enable_slot_diffusion --checkpoint="MTL_Diffu_Guide/pretrained/SlotDiffMOE/epoch-500.pt"
 
 # 4. Evaluation on CVRPLIB
 python test.py --problem=CVRP --model_type={MODEL_TYPE} --checkpoint={MODEL_PATH} --test_set_path=../data/CVRP-LIB

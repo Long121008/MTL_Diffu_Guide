@@ -12,4 +12,6 @@ results/20251111_211024/epoch-60.pt
 
 python test.py --problem=CVRP --model_type=MTL --checkpoint="results/20251105_133802/epoch-60.pt"
 
-python test.py --problem=CVRP --model_type=MOE_Mixed --checkpoint="./pretrained/MixedMOE/epoch-500.pt"
+python test.py --problem=ALL --model_type=MOE_Mixed --checkpoint="./pretrained/MixedMOE/epoch-500.pt"
+
+python test.py --problem=VRPBLTW --model_type=MTL --checkpoint="./pretrained/pomo_mtl_n50/epoch-5000.pt" --fine_tune_epochs=10 

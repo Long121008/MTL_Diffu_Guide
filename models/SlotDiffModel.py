@@ -6,7 +6,7 @@ __all__ = ['SlotDiffModel']
 
 
 # =========================================================================
-# SLOT ATTENTION MODULES
+# SLOT ATTENTION MODULES (PLUG-AND-PLAY)
 # =========================================================================
 
 class IterativeAttention(nn.Module):
@@ -100,43 +100,40 @@ class SlotAttentionModule(nn.Module):
 
 
 # =========================================================================
-# LATENT DIFFUSION DENOISER (NEW!)
+# LATENT DIFFUSION DENOISER (PLUG-AND-PLAY)
 # =========================================================================
 
 class LDMDenoiser(nn.Module):
-    """
-    Denoiser cho Slot Diffusion
-    Sử dụng Cross-Attention để z_t "hỏi" slots về cách khử nhiễu
-    """
-    def __init__(self, feature_dim, slot_dim, denoiser_dim, n_heads=4, n_layers=2):
+    """Denoiser for Slot Diffusion"""
+    def __init__(self, feature_dim, slot_dim, denoiser_dim, n_heads=4, n_layers=2, max_timesteps=1000):
         super().__init__()
         
-        # 0. Input/Output Projections (NEW!)
-        # Phóng từ 5-chiều (z_t) lên không gian làm việc (128-chiều)
+        # Input/Output Projections
         self.input_projection = nn.Linear(feature_dim, denoiser_dim)
         
-        # 1. Time Embedding
+        # Time Embedding
         self.time_embedder = nn.Sequential(
-            nn.Linear(1, denoiser_dim),     # FIX: Lên denoiser_dim
+            nn.Linear(denoiser_dim, denoiser_dim),
             nn.SiLU(),
-            nn.Linear(denoiser_dim, denoiser_dim) # FIX: Lên denoiser_dim
+            nn.Linear(denoiser_dim, denoiser_dim)
         )
+        self.denoiser_dim = denoiser_dim
         
-        # 2. Cross-Attention: z_t (Query) <-> Slots (Key, Value)
+        # Cross-Attention
         self.cross_attention = nn.MultiheadAttention(
-            embed_dim=denoiser_dim, # FIX: Dùng denoiser_dim (e.g., 128)
+            embed_dim=denoiser_dim,
             kdim=slot_dim,
             vdim=slot_dim,
-            num_heads=n_heads,      # num_heads (e.g., 4) -> 128 % 4 == 0 (OK!)
+            num_heads=n_heads,
             batch_first=True
         )
         
-        self.cross_norm = nn.LayerNorm(denoiser_dim) # FIX: Lên denoiser_dim
+        self.cross_norm = nn.LayerNorm(denoiser_dim)
         
-        # 3. Self-Attention Transformer Layers
+        # Transformer Layers
         self.transformer_layers = nn.ModuleList([
             nn.TransformerEncoderLayer(
-                d_model=denoiser_dim, # FIX: Lên denoiser_dim
+                d_model=denoiser_dim,
                 nhead=n_heads,
                 dim_feedforward=denoiser_dim * 4,
                 batch_first=True,
@@ -144,88 +141,177 @@ class LDMDenoiser(nn.Module):
             ) for _ in range(n_layers)
         ])
         
-        # 4. Output Layer - dự đoán noise
+        # Output Layer
         self.out_layer = nn.Sequential(
-            nn.Linear(denoiser_dim, denoiser_dim * 2), # FIX: Từ denoiser_dim
+            nn.Linear(denoiser_dim, denoiser_dim * 2),
             nn.SiLU(),
-            nn.Linear(denoiser_dim * 2, feature_dim) # FIX: Chiếu về feature_dim (5)
+            nn.Linear(denoiser_dim * 2, feature_dim)
         )
 
+    def _get_timestep_embedding(self, timesteps, dim):
+        import math
+        half_dim = dim // 2
+        emb = math.log(10000) / (half_dim - 1)
+        emb = torch.exp(torch.arange(half_dim, device=timesteps.device) * -emb)
+        emb = timesteps[:, None].float() * emb[None, :]
+        emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=-1)
+        if dim % 2 == 1:
+            emb = F.pad(emb, (0, 1))
+        return emb
+
     def forward(self, z_t, t, slots):
-        """
-        Args:
-            z_t: [B, N, feature_dim] - dữ liệu nhiễu (e.g., 5-dim)
-            t: [B] - timestep 
-            slots: [B, K, slot_dim] - điều kiện từ SlotAttention (e.g., 128-dim)
-        Returns:
-            predicted_noise: [B, N, feature_dim] (e.g., 5-dim)
-        """
-        B, N, D_feat = z_t.shape
+        B, N, D = z_t.shape
         
-        # 0. Project z_t lên không gian làm việc (NEW!)
-        z_t_embed = self.input_projection(z_t) # [B, N, denoiser_dim]
+        # Project z_t
+        z_t_embed = self.input_projection(z_t)
+
+        # Embed timestep
+        t_emb_sin = self._get_timestep_embedding(t, self.denoiser_dim)
+        t_emb = self.time_embedder(t_emb_sin)
+        t_emb = t_emb.unsqueeze(1).expand(-1, N, -1)
         
-        # 1. Embed timestep và broadcast
-        t_emb = self.time_embedder(t.float().unsqueeze(-1)) # [B, denoiser_dim]
-        t_emb = t_emb.unsqueeze(1).expand(-1, N, -1)     # [B, N, denoiser_dim]
-        
-        # 2. Add time embedding
+        # Add time
         z_t_with_time = z_t_embed + t_emb
         
-        # 3. Cross-Attention: z_t "hỏi" slots
+        # Cross-Attention
         attn_output, _ = self.cross_attention(
             query=z_t_with_time,
             key=slots,
             value=slots
         )
         
-        # 4. Residual + Norm
+        # Residual + Norm
         x = self.cross_norm(z_t_with_time + attn_output)
         
-        # 5. Self-Attention layers
+        # Transformer Layers
         for layer in self.transformer_layers:
             x = layer(x)
             
-        # 6. Predict noise (Project về 5-dim)
+        # Predict noise
         predicted_noise = self.out_layer(x)
         
         return predicted_noise
 
 
 # =========================================================================
-# SLOT DIFFUSION MODEL (UPDATED WITH DUAL-TASK)
+# ENHANCED ENCODER LAYER (PROGRESSIVE SLOT INTEGRATION)
+# =========================================================================
+
+class EnhancedEncoderLayer(nn.Module):
+    """Encoder layer with optional slot cross-attention"""
+    def __init__(self, depth=0, **model_params):
+        super().__init__()
+        self.model_params = model_params
+        embedding_dim = model_params['embedding_dim']
+        head_num = model_params['head_num']
+        qkv_dim = model_params['qkv_dim']
+        
+        # Self-Attention
+        self.Wq = nn.Linear(embedding_dim, head_num * qkv_dim, bias=False)
+        self.Wk = nn.Linear(embedding_dim, head_num * qkv_dim, bias=False)
+        self.Wv = nn.Linear(embedding_dim, head_num * qkv_dim, bias=False)
+        self.multi_head_combine = nn.Linear(head_num * qkv_dim, embedding_dim)
+        
+        # Cross-Attention with Slots
+        self.Wq_cross = nn.Linear(embedding_dim, head_num * qkv_dim, bias=False)
+        self.Wk_cross = nn.Linear(embedding_dim, head_num * qkv_dim, bias=False)
+        self.Wv_cross = nn.Linear(embedding_dim, head_num * qkv_dim, bias=False)
+        self.multi_head_combine_cross = nn.Linear(head_num * qkv_dim, embedding_dim)
+        
+        self.addAndNormalization1 = Add_And_Normalization_Module(**model_params)
+        self.addAndNormalization_cross = Add_And_Normalization_Module(**model_params)
+        self.feedForward = FeedForward(**model_params)
+        self.addAndNormalization2 = Add_And_Normalization_Module(**model_params)
+
+    def forward(self, input1, slot_features=None):
+        head_num = self.model_params['head_num']
+        
+        # Self-Attention
+        q = reshape_by_heads(self.Wq(input1), head_num=head_num)
+        k = reshape_by_heads(self.Wk(input1), head_num=head_num)
+        v = reshape_by_heads(self.Wv(input1), head_num=head_num)
+        
+        if self.model_params['norm_loc'] == "norm_last":
+            out_concat = multi_head_attention(q, k, v)
+            multi_head_out = self.multi_head_combine(out_concat)
+            out1 = self.addAndNormalization1(input1, multi_head_out)
+            
+            # Cross-Attention with Slots
+            if slot_features is not None:
+                q_cross = reshape_by_heads(self.Wq_cross(out1), head_num=head_num)
+                k_cross = reshape_by_heads(self.Wk_cross(slot_features), head_num=head_num)
+                v_cross = reshape_by_heads(self.Wv_cross(slot_features), head_num=head_num)
+                out_concat_cross = multi_head_attention(q_cross, k_cross, v_cross)
+                multi_head_out_cross = self.multi_head_combine_cross(out_concat_cross)
+                out1 = self.addAndNormalization_cross(out1, multi_head_out_cross)
+            
+            out2 = self.feedForward(out1)
+            out3 = self.addAndNormalization2(out1, out2)
+        else:
+            out1 = self.addAndNormalization1(None, input1)
+            out_concat = multi_head_attention(q, k, v)
+            multi_head_out = self.multi_head_combine(out_concat)
+            input2 = input1 + multi_head_out
+            
+            # Cross-Attention with Slots
+            if slot_features is not None:
+                q_cross = reshape_by_heads(self.Wq_cross(input2), head_num=head_num)
+                k_cross = reshape_by_heads(self.Wk_cross(slot_features), head_num=head_num)
+                v_cross = reshape_by_heads(self.Wv_cross(slot_features), head_num=head_num)
+                out_concat_cross = multi_head_attention(q_cross, k_cross, v_cross)
+                multi_head_out_cross = self.multi_head_combine_cross(out_concat_cross)
+                input2 = input2 + multi_head_out_cross
+            
+            out2 = self.addAndNormalization2(None, input2)
+            out2 = self.feedForward(out2)
+            out3 = input2 + out2
+        
+        return out3
+
+
+# =========================================================================
+# MTL MODEL (POMO WITH SLOT DIFFUSION)
 # =========================================================================
 
 class SlotDiffModel(nn.Module):
+    """
+    POMO Model with Slot Diffusion
+    
+    Features:
+    - Pure POMO architecture (no MOE)
+    - Slot Attention for representation learning
+    - Latent Diffusion for auxiliary task
+    - Progressive slot integration
+    - Gated slot decoder
+    """
     def __init__(self, **model_params):
         super().__init__()
         self.model_params = model_params
-        self.eval_type = self.model_params['eval_type']
-        self.problem = self.model_params['problem']
+        self.eval_type = model_params['eval_type']
+        self.problem = model_params['problem']
 
-        # Encoder chung
+        # Main components
         self.encoder = MTL_Encoder(**model_params)
-        
-        # Nhánh 1: VRP Decoder (policy)
         self.decoder = MTL_Decoder(**model_params)
         
-        # Nhánh 2: Slot Diffusion Denoiser (representation learning)
+        # Slot Diffusion components
         self.enable_diffusion = model_params.get('enable_slot_diffusion', False)
         if self.enable_diffusion:
-            feature_dim = 5  # node_xy (2) + demand (1) + tw_start (1) + tw_end (1)
+            feature_dim = 5
             slot_dim = model_params['embedding_dim']
-            denoiser_dim = model_params['embedding_dim'] # <-- (FIX: Dùng 128 thay vì 5)
+            denoiser_dim = model_params['embedding_dim']
+            
             self.denoiser = LDMDenoiser(
                 feature_dim=feature_dim,
                 slot_dim=slot_dim,
-                denoiser_dim=denoiser_dim,       # 128 (MỚI!)
+                denoiser_dim=denoiser_dim,
                 n_heads=model_params.get('denoiser_heads', 4),
-                n_layers=model_params.get('denoiser_layers', 2)
+                n_layers=model_params.get('denoiser_layers', 2),
+                max_timesteps=model_params.get('max_timesteps', 1000)
             )
             self.max_timesteps = model_params.get('max_timesteps', 1000)
-            self.diffusion_alpha = model_params.get('diffusion_alpha', 0.1)
         
-        # Legacy reconstruction (optional, có thể giữ hoặc bỏ)
+        # Legacy reconstruction
         self.enable_reconstruction = model_params.get('enable_slot_reconstruction', False)
         if self.enable_reconstruction:
             self.reconstruction_head = nn.Sequential(
@@ -236,7 +322,7 @@ class SlotDiffModel(nn.Module):
         
         self.encoded_nodes = None
         self.slots = None
-        self.original_features = None  # Lưu z_0 cho diffusion
+        self.original_features = None
         self.device = torch.device('cuda', torch.cuda.current_device()) if 'device' not in model_params.keys() else model_params['device']
 
     def pre_forward(self, reset_state):
@@ -246,26 +332,28 @@ class SlotDiffModel(nn.Module):
         node_tw_start = reset_state.node_tw_start
         node_tw_end = reset_state.node_tw_end
         
-        # Lưu original features cho diffusion (z_0)
         node_xy_demand_tw = torch.cat(
             (node_xy, node_demand[:, :, None], 
              node_tw_start[:, :, None], node_tw_end[:, :, None]), 
             dim=2
         )
-        self.original_features = node_xy_demand_tw  # [B, N, 5]
-
-        # Encoder chung
+        
+        # Save for diffusion
+        self.original_features = node_xy_demand_tw
+        
+        # Encode
         self.encoded_nodes = self.encoder(depot_xy, node_xy_demand_tw)
+        
+        # Get slots
         self.slots = self.encoder.slot_attention_module.last_slots
         
-        # Set KV cho decoder (nhánh 1)
+        # Set decoder KV
         self.decoder.set_kv(self.encoded_nodes, slots=self.slots)
 
     def set_eval_type(self, eval_type):
         self.eval_type = eval_type
 
     def forward(self, state, selected=None):
-        """Nhánh 1: VRP Policy (giữ nguyên)"""
         batch_size = state.BATCH_IDX.size(0)
         pomo_size = state.BATCH_IDX.size(1)
 
@@ -308,37 +396,25 @@ class SlotDiffModel(nn.Module):
         return selected, prob
     
     def compute_slot_diffusion_loss(self):
-        """
-        Nhánh 2: Slot Diffusion Loss (MỚI!)
-        
-        Quy trình:
-        1. Lấy z_0 (original_features) và slots
-        2. Sample timestep t ngẫu nhiên
-        3. Thêm noise vào z_0 -> z_t
-        4. Dùng denoiser để predict noise
-        5. Tính MSE loss
-        """
+        """Slot Diffusion Loss"""
         if not self.enable_diffusion or self.slots is None or self.original_features is None:
             return torch.tensor(0.0, device=self.device)
         
-        z_0 = self.original_features[:, 1:, :]  # Bỏ depot, chỉ lấy customers [B, N-1, 5]
+        z_0 = self.original_features
         B, N, D = z_0.shape
         
-        # Sample random timesteps
+        # Sample timesteps
         t = torch.randint(0, self.max_timesteps, (B,), device=self.device)
         
         # Sample noise
         noise = torch.randn_like(z_0)
         
-        # Add noise theo schedule (simple linear schedule)
-        # alpha_t = 1 - t / max_timesteps
+        # Add noise
         alpha_t = 1.0 - t.float() / self.max_timesteps
         alpha_t = alpha_t.view(B, 1, 1)
-        
-        # z_t = sqrt(alpha_t) * z_0 + sqrt(1 - alpha_t) * noise
         z_t = torch.sqrt(alpha_t) * z_0 + torch.sqrt(1 - alpha_t) * noise
         
-        # Predict noise using denoiser
+        # Predict noise
         predicted_noise = self.denoiser(z_t, t, self.slots)
         
         # MSE loss
@@ -347,7 +423,7 @@ class SlotDiffModel(nn.Module):
         return diffusion_loss
     
     def compute_slot_reconstruction_loss(self, reset_state):
-        """Legacy reconstruction loss (giữ lại nếu cần)"""
+        """Legacy Reconstruction Loss"""
         if not self.enable_reconstruction or self.slots is None:
             return torch.tensor(0.0, device=self.device)
         
@@ -378,7 +454,7 @@ class SlotDiffModel(nn.Module):
         return recon_loss
     
     def compute_slot_contrastive_loss(self):
-        """Contrastive loss để đảm bảo slots khác biệt"""
+        """Contrastive Loss for slot diversity"""
         if self.slots is None:
             return torch.tensor(0.0, device=self.device)
         
@@ -406,134 +482,80 @@ def _get_encoding(encoded_nodes, node_index_to_pick):
 
 
 # =========================================================================
-# ENCODER
+# ENCODER WITH PROGRESSIVE SLOT INTEGRATION
 # =========================================================================
 
 class MTL_Encoder(nn.Module):
     def __init__(self, **model_params):
         super().__init__()
         self.model_params = model_params
-        embedding_dim = self.model_params['embedding_dim']
-        encoder_layer_num = self.model_params['encoder_layer_num']
-
+        embedding_dim = model_params['embedding_dim']
+        encoder_layer_num = model_params['encoder_layer_num']
+        
+        # Feature embedding (Pure Linear, no MOE)
         self.embedding_depot = nn.Linear(2, embedding_dim)
         self.embedding_node = nn.Linear(5, embedding_dim)
         
+        # Slot Attention Module
         self.slot_attention_module = SlotAttentionModule(**model_params)
-        self.slot_to_node_cross_atten = EncoderLayer(**model_params)
         
+        # Progressive Slot Integration
         self.layers = nn.ModuleList([
-            EncoderLayer(**model_params) for _ in range(encoder_layer_num)
+            EnhancedEncoderLayer(i, **model_params) for i in range(encoder_layer_num)
         ])
 
     def forward(self, depot_xy, node_xy_demand_tw):
+        # Embed features
         embedded_depot = self.embedding_depot(depot_xy)
         embedded_node = self.embedding_node(node_xy_demand_tw)
-
-        H_nodes = torch.cat((embedded_depot, embedded_node), dim=1)
-        H_slots = self.slot_attention_module(H_nodes)
-        H_reconstructed = self.slot_to_node_cross_atten.forward_cross(H_nodes, H_slots)
         
-        out = H_reconstructed
-        for layer in self.layers:
-            out = layer(out)
+        H_nodes = torch.cat((embedded_depot, embedded_node), dim=1)
+        
+        # Generate slots
+        H_slots = self.slot_attention_module(H_nodes)
+        
+        # Progressive slot integration (layers 3-5)
+        out = H_nodes
+        for i, layer in enumerate(self.layers):
+            slots_to_use = H_slots if i >= len(self.layers) // 2 else None
+            out = layer(out, slot_features=slots_to_use)
 
         return out
 
 
-class EncoderLayer(nn.Module):
-    def __init__(self, **model_params):
-        super().__init__()
-        self.model_params = model_params
-        embedding_dim = self.model_params['embedding_dim']
-        head_num = self.model_params['head_num']
-        qkv_dim = self.model_params['qkv_dim']
-
-        self.Wq = nn.Linear(embedding_dim, head_num * qkv_dim, bias=False)
-        self.Wk = nn.Linear(embedding_dim, head_num * qkv_dim, bias=False)
-        self.Wv = nn.Linear(embedding_dim, head_num * qkv_dim, bias=False)
-        self.multi_head_combine = nn.Linear(head_num * qkv_dim, embedding_dim)
-
-        self.addAndNormalization1 = Add_And_Normalization_Module(**model_params)
-        self.feedForward = FeedForward(**model_params)
-        self.addAndNormalization2 = Add_And_Normalization_Module(**model_params)
-
-    def forward(self, input1):
-        head_num = self.model_params['head_num']
-
-        q = reshape_by_heads(self.Wq(input1), head_num=head_num)
-        k = reshape_by_heads(self.Wk(input1), head_num=head_num)
-        v = reshape_by_heads(self.Wv(input1), head_num=head_num)
-
-        if self.model_params['norm_loc'] == "norm_last":
-            out_concat = multi_head_attention(q, k, v)
-            multi_head_out = self.multi_head_combine(out_concat)
-            out1 = self.addAndNormalization1(input1, multi_head_out)
-            out2 = self.feedForward(out1)
-            out3 = self.addAndNormalization2(out1, out2)
-        else:
-            out1 = self.addAndNormalization1(None, input1)
-            out_concat = multi_head_attention(q, k, v)
-            multi_head_out = self.multi_head_combine(out_concat)
-            input2 = input1 + multi_head_out
-            out2 = self.addAndNormalization2(None, input2)
-            out2 = self.feedForward(out2)
-            out3 = input2 + out2
-
-        return out3
-    
-    def forward_cross(self, query_input, kv_input):
-        head_num = self.model_params['head_num']
-
-        q = reshape_by_heads(self.Wq(query_input), head_num=head_num)
-        k = reshape_by_heads(self.Wk(kv_input), head_num=head_num)
-        v = reshape_by_heads(self.Wv(kv_input), head_num=head_num)
-
-        out_concat = multi_head_attention(q, k, v)
-        multi_head_out = self.multi_head_combine(out_concat)
-
-        if self.model_params['norm_loc'] == "norm_last":
-            out1 = self.addAndNormalization1(query_input, multi_head_out)
-            out2 = self.feedForward(out1)
-            out3 = self.addAndNormalization2(out1, out2)
-        else:
-            out1 = self.addAndNormalization1(None, query_input)
-            input2 = out1 + multi_head_out
-            out2 = self.addAndNormalization2(None, input2)
-            out2 = self.feedForward(out2)
-            out3 = input2 + out2
-
-        return out3
-
-
 # =========================================================================
-# DECODER
+# DECODER WITH SLOT GATING
 # =========================================================================
 
 class MTL_Decoder(nn.Module):
     def __init__(self, **model_params):
         super().__init__()
         self.model_params = model_params
-        embedding_dim = self.model_params['embedding_dim']
-        head_num = self.model_params['head_num']
-        qkv_dim = self.model_params['qkv_dim']
+        embedding_dim = model_params['embedding_dim']
+        head_num = model_params['head_num']
+        qkv_dim = model_params['qkv_dim']
 
         self.Wq_last = nn.Linear(embedding_dim + 4, head_num * qkv_dim, bias=False)
         
+        # Node attention
         self.Wk_nodes = nn.Linear(embedding_dim, head_num * qkv_dim, bias=False)
         self.Wv_nodes = nn.Linear(embedding_dim, head_num * qkv_dim, bias=False)
         
+        # Slot attention
         self.Wk_slots = nn.Linear(embedding_dim, head_num * qkv_dim, bias=False)
         self.Wv_slots = nn.Linear(embedding_dim, head_num * qkv_dim, bias=False)
-
-        self.multi_head_combine = nn.Linear(head_num * qkv_dim, embedding_dim)
+        
+        # Gating mechanism
         self.slot_gate = nn.Linear(embedding_dim + 4, 1)
+        
+        # Multi-head combine (Pure Linear, no MOE)
+        self.multi_head_combine = nn.Linear(head_num * qkv_dim, embedding_dim)
 
         self.k_nodes = None
         self.v_nodes = None
         self.k_slots = None
         self.v_slots = None
-        self.single_head_key_nodes = None
+        self.single_head_key = None
         self.slots = None
 
     def set_kv(self, encoded_nodes, slots=None):
@@ -541,7 +563,7 @@ class MTL_Decoder(nn.Module):
 
         self.k_nodes = reshape_by_heads(self.Wk_nodes(encoded_nodes), head_num=head_num)
         self.v_nodes = reshape_by_heads(self.Wv_nodes(encoded_nodes), head_num=head_num)
-        self.single_head_key_nodes = encoded_nodes.transpose(1, 2)
+        self.single_head_key = encoded_nodes.transpose(1, 2)
         
         if slots is not None:
             self.slots = slots
@@ -554,22 +576,27 @@ class MTL_Decoder(nn.Module):
         input_cat = torch.cat((encoded_last_node, attr), dim=2)
         q_last = reshape_by_heads(self.Wq_last(input_cat), head_num=head_num)
 
-        out_concat_nodes = multi_head_attention(q_last, self.k_nodes, self.v_nodes,
-                                               rank3_ninf_mask=ninf_mask)
+        # Attention to nodes
+        out_concat_nodes = multi_head_attention(q_last, self.k_nodes, self.v_nodes, rank3_ninf_mask=ninf_mask)
 
+        # Attention to slots (if available)
         if self.slots is not None:
             out_concat_slots = multi_head_attention(q_last, self.k_slots, self.v_slots)
             
+            # Gating mechanism
             gate_logit = self.slot_gate(input_cat)
             gate_weight = torch.sigmoid(gate_logit)
             
+            # Weighted combination
             out_concat = gate_weight * out_concat_slots + (1 - gate_weight) * out_concat_nodes
         else:
             out_concat = out_concat_nodes
 
+        # Multi-head combine
         mh_atten_out = self.multi_head_combine(out_concat)
 
-        score = torch.matmul(mh_atten_out, self.single_head_key_nodes)
+        # Single-head attention for probability
+        score = torch.matmul(mh_atten_out, self.single_head_key)
 
         sqrt_embedding_dim = self.model_params['sqrt_embedding_dim']
         logit_clipping = self.model_params['logit_clipping']
