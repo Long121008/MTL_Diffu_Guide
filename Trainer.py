@@ -24,6 +24,8 @@ class Trainer:
         self.lambda_diffusion = trainer_params.get('lambda_diffusion', 0.1)
         self.lambda_recon = trainer_params.get('lambda_recon', 0.0)
         self.lambda_contrastive = trainer_params.get('lambda_contrastive', 0.01)
+        self.lambda_consistency = trainer_params.get('lambda_consistency', 0.05)
+        self.consistency_jitter_std = trainer_params.get('consistency_jitter_std', 0.01)
         
         # Log cấu hình loss
         print("=" * 60)
@@ -31,7 +33,8 @@ class Trainer:
         print(f"  - RL Loss: 1.0 (base)")
         print(f"  - Diffusion Loss: {self.lambda_diffusion}")
         print(f"  - Reconstruction Loss: {self.lambda_recon}")
-        print(f"  - Contrastive Loss: {self.lambda_contrastive}")
+        print(f"  - Contrastive (Diversity) Loss: {self.lambda_contrastive}")
+        print(f"  - Consistency Loss: {self.lambda_consistency} (jitter_std={self.consistency_jitter_std})")
         print("=" * 60)
 
         self.device = args.device
@@ -39,7 +42,7 @@ class Trainer:
         self.result_log = {"val_score": [], "val_gap": []}
 
         # Lưu lịch sử loss: Total, RL, Diffusion, Contrastive
-        self.loss_log = {"total": [], "rl": [], "diffusion": [], "contrastive": []}
+        self.loss_log = {"total": [], "rl": [], "diffusion": [], "contrastive": [], "consistency": []}
 
         # Main Components
         self.envs = get_env(self.args.problem)
@@ -69,7 +72,7 @@ class Trainer:
         log_file_path = os.path.join(self.log_path, 'loss_history.csv')
         if self.start_epoch == 1:
             with open(log_file_path, 'w') as f:
-                f.write('Epoch,Total_Loss,RL_Loss,Diffusion_Loss,Contrastive_Loss,Score\n')
+                f.write('Epoch,Total_Loss,RL_Loss,Diffusion_Loss,Contrastive_Loss,Consistency_Loss,Score\n')
 
         # [QUAN TRỌNG] Chỉ giữ lại MỘT vòng lặp chính
         for epoch in range(self.start_epoch, self.trainer_params['epochs']+1):
@@ -84,7 +87,8 @@ class Trainer:
                 rl = details.get('rl', 0)
                 diff = details.get('diffusion', 0)
                 contra = details.get('contrastive', 0)
-                log_line = f"{epoch},{train_loss:.5f},{rl:.5f},{diff:.5f},{contra:.5f},{train_score:.5f}\n"
+                consist = details.get('consistency', 0)
+                log_line = f"{epoch},{train_loss:.5f},{rl:.5f},{diff:.5f},{contra:.5f},{consist:.5f},{train_score:.5f}\n"
                 f.write(log_line)
 
             # Logs & Checkpoint
@@ -117,7 +121,8 @@ class Trainer:
         avg_meters = {
             "rl": AverageMeter(),
             "diffusion": AverageMeter(),
-            "contrastive": AverageMeter()
+            "contrastive": AverageMeter(),
+            "consistency": AverageMeter()
         }
 
         while episode < train_num_episode:
@@ -156,6 +161,7 @@ class Trainer:
         self.loss_log["rl"].append(avg_meters["rl"].avg)
         self.loss_log["diffusion"].append(avg_meters["diffusion"].avg)
         self.loss_log["contrastive"].append(avg_meters["contrastive"].avg)
+        self.loss_log["consistency"].append(avg_meters["consistency"].avg)
 
         print('Epoch {:3d}: Train ({:3.0f}%)  Score: {:.4f},  Loss: {:.4f}'.format(
             epoch, 100. * episode / train_num_episode, score_AM.avg, loss_AM.avg))
@@ -164,7 +170,8 @@ class Trainer:
         return score_AM.avg, loss_AM.avg, {
             "rl": avg_meters["rl"].avg,
             "diffusion": avg_meters["diffusion"].avg,
-            "contrastive": avg_meters["contrastive"].avg
+            "contrastive": avg_meters["contrastive"].avg,
+            "consistency": avg_meters["consistency"].avg
         }
 
     def _train_one_batch(self, data, env):
@@ -214,7 +221,7 @@ class Trainer:
             except Exception as e:
                 loss_dict['recon'] = 0.0
 
-        # 4. Contrastive Loss
+        # 4. Contrastive (Diversity) Loss — kích hoạt để enforce slot diversity
         if self.lambda_contrastive > 0.0:
             try:
                 contrastive_loss = self.model.compute_slot_contrastive_loss()
@@ -222,6 +229,17 @@ class Trainer:
                 loss_dict['contrastive'] = contrastive_loss.item()
             except Exception as e:
                 loss_dict['contrastive'] = 0.0
+
+        # 5. Consistency Loss — L_consistency = ||S(X) - S(X_tilde)||^2
+        if self.lambda_consistency > 0.0:
+            try:
+                consistency_loss = self.model.compute_slot_consistency_loss(
+                    jitter_std=self.consistency_jitter_std
+                )
+                total_loss = total_loss + self.lambda_consistency * consistency_loss
+                loss_dict['consistency'] = consistency_loss.item()
+            except Exception as e:
+                loss_dict['consistency'] = 0.0
 
         if hasattr(self.model, "aux_loss"):
             total_loss = total_loss + self.model.aux_loss

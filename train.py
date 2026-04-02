@@ -75,6 +75,8 @@ def args2dict(args):
         "lambda_diffusion": args.lambda_diffusion,
         "lambda_recon": args.lambda_recon,
         "lambda_contrastive": args.lambda_contrastive,
+        "lambda_consistency": args.lambda_consistency,
+        "consistency_jitter_std": args.consistency_jitter_std,
     }
 
     return env_params, model_params, optimizer_params, trainer_params
@@ -174,7 +176,7 @@ if __name__ == "__main__":
                         help="total training epochs")
     parser.add_argument('--train_episodes', type=int, default=10000 * 2, 
                         help="the num. of training instances per epoch")
-    parser.add_argument('--train_batch_size', type=int, default=512)
+    parser.add_argument('--train_batch_size', type=int, default=128)
     parser.add_argument('--validation_interval', type=int, default=5000)
     parser.add_argument('--model_save_interval', type=int, default=1000)
     parser.add_argument('--checkpoint', type=str, default=None, 
@@ -188,7 +190,11 @@ if __name__ == "__main__":
     parser.add_argument('--lambda_recon', type=float, default=0.0,
                         help="Weight for legacy reconstruction loss (usually 0)")
     parser.add_argument('--lambda_contrastive', type=float, default=0.01,
-                        help="Weight for slot contrastive loss (ensure slot diversity)")
+                        help="Weight for slot contrastive/diversity loss (ensure slot diversity)")
+    parser.add_argument('--lambda_consistency', type=float, default=0.05,
+                        help="Weight for slot consistency loss L_consistency=||S(X)-S(X_tilde)||^2")
+    parser.add_argument('--consistency_jitter_std', type=float, default=0.01,
+                        help="Gaussian noise std for augmentation in consistency loss (coords in [0,1])")
 
     # =========================================================================
     # SETTINGS (GPU, SEED, etc.)
@@ -228,7 +234,7 @@ if __name__ == "__main__":
         print(f"   - Nhánh 2 (Representation): Slot Diffusion")
         print(f"   - Diffusion Timesteps: {args.max_timesteps}")
         print(f"   - Denoiser: {args.denoiser_layers} layers, {args.denoiser_heads} heads")
-        print(f"   - Loss Weights: λ_diffusion={args.lambda_diffusion}, λ_contrastive={args.lambda_contrastive}")
+        print(f"   - Loss Weights: λ_diffusion={args.lambda_diffusion}, λ_contrastive={args.lambda_contrastive}, λ_consistency={args.lambda_consistency}")
         print()
 
     # =========================================================================
