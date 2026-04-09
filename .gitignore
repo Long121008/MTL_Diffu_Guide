@@ -16,3 +16,8 @@ pretrained_stat
 pretrained_final
 tmp
 plot.py
+results/
+results_old/
+pretrained/
+
+analysis/

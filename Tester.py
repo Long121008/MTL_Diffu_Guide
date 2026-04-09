@@ -1,6 +1,6 @@
 import os, re, time
 from torch.optim import Adam as Optimizer
-
+import csv
 import envs
 from utils import *
 
@@ -17,7 +17,7 @@ class Tester:
         # ENV, MODEL, & Load checkpoint
         self.envs = get_env(self.args.problem)  # Env Class
         self.device = args.device
-        self.checkpoint = torch.load(args.checkpoint, map_location=self.device)
+        self.checkpoint = torch.load(args.checkpoint, map_location=self.device, weights_only=False)
         self.model_params['problem'] = self.checkpoint['problem']  # training problem of the checkpoint
         self.model = get_model(self.args.model_type)(**self.model_params)
         self.fine_tune_model = get_model(self.args.model_type)(**self.model_params)
@@ -104,6 +104,29 @@ class Tester:
                 print(" AUGMENTATION SCORE: {:.4f}, Gap: {:.4f} ".format(aug_score_AM.avg, aug_gap_AM.avg))
                 print("{:.3f} ({:.3f}%)".format(score_AM.avg, gap_AM.avg))
                 print("{:.3f} ({:.3f}%)".format(aug_score_AM.avg, aug_gap_AM.avg))
+                
+                
+                # Save results to CSV
+                os.makedirs(self.args.log_path, exist_ok=True)
+                result_file = os.path.join(self.args.log_path, f'test_results_{env.problem}.csv')
+                
+                # Write header if file doesn't exist
+                file_exists = os.path.isfile(result_file)
+                with open(result_file, 'a', newline='') as f:
+                    writer = csv.writer(f)
+                    if not file_exists:
+                        writer.writerow(['timestamp', 'problem', 'problem_size', 'no_aug_score', 'no_aug_gap', 'aug_score', 'aug_gap'])
+                    writer.writerow([
+                        time.strftime('%Y-%m-%d %H:%M:%S'),
+                        env.problem,
+                        env.problem_size,
+                        f"{score_AM.avg:.4f}",
+                        f"{gap_AM.avg:.4f}",
+                        f"{aug_score_AM.avg:.4f}",
+                        f"{aug_gap_AM.avg:.4f}"
+                    ])
+                
+                print(f"Results saved to {result_file}")
 
         return scores, aug_scores
 

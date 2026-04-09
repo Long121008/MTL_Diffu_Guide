@@ -4,7 +4,8 @@ import torch.nn.functional as F
 import random
 from torch.optim import Adam as Optimizer
 from torch.optim.lr_scheduler import MultiStepLR as Scheduler
-from models.MTLModel import _get_encoding
+import csv
+
 from utils import *
 
 
@@ -17,10 +18,22 @@ class Trainer:
         self.optimizer_params = optimizer_params
         self.trainer_params = trainer_params
 
-        # Loss weights configuration
-        self.lambda_recon = trainer_params.get('lambda_recon', 0.1)
-        self.lambda_contrast = trainer_params.get('lambda_contrast', 0.05)
-        self.lambda_guidance = trainer_params.get('lambda_guidance', 0.3)  # NEW: Diffusion guidance weight
+        # ========================================
+        # LOSS WEIGHTS CONFIGURATION
+        # ========================================
+        # Lambda cho các auxiliary losses
+        self.lambda_diffusion = trainer_params.get('lambda_diffusion', 0.1)
+        self.lambda_recon = trainer_params.get('lambda_recon', 0.0)  # Legacy recon (thường tắt)
+        self.lambda_contrastive = trainer_params.get('lambda_contrastive', 0.01)
+        
+        # Log cấu hình loss
+        print("=" * 60)
+        print("LOSS CONFIGURATION:")
+        print(f"  - RL Loss: 1.0 (base)")
+        print(f"  - Diffusion Loss: {self.lambda_diffusion}")
+        print(f"  - Reconstruction Loss: {self.lambda_recon}")
+        print(f"  - Contrastive Loss: {self.lambda_contrastive}")
+        print("=" * 60)
 
         self.device = args.device
         self.log_path = args.log_path
@@ -37,7 +50,7 @@ class Trainer:
         self.start_epoch = 1
         if args.checkpoint is not None:
             checkpoint_fullname = args.checkpoint
-            checkpoint = torch.load(checkpoint_fullname, map_location=self.device)
+            checkpoint = torch.load(checkpoint_fullname, map_location=self.device, weights_only=False)
             self.model.load_state_dict(checkpoint['model_state_dict'], strict=True)
             self.start_epoch = 1 + checkpoint['epoch']
             self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
@@ -46,6 +59,10 @@ class Trainer:
 
         # utility
         self.time_estimator = TimeEstimator()
+        
+        self.train_log_file = open(f"{self.log_path}/train_log.csv", 'w', newline='')
+        self.train_logger = csv.writer(self.train_log_file)
+        self.train_logger.writerow(['epoch', 'score', 'loss'])
 
     def run(self):
         self.time_estimator.reset(self.start_epoch)
@@ -63,7 +80,7 @@ class Trainer:
 
             all_done = (epoch == self.trainer_params['epochs'])
             model_save_interval = self.trainer_params['model_save_interval']
-            
+
             if all_done or (epoch % model_save_interval == 0):
                 print("Saving trained_model")
                 checkpoint_dict = {
@@ -79,10 +96,6 @@ class Trainer:
     def _train_one_epoch(self, epoch):
         episode = 0
         score_AM, loss_AM = AverageMeter(), AverageMeter()
-        rl_loss_AM, guidance_loss_AM = AverageMeter(), AverageMeter()
-        recon_loss_AM, contrast_loss_AM = AverageMeter(), AverageMeter()
-        alpha_AM = AverageMeter()
-        
         train_num_episode = self.trainer_params['train_episodes']
 
         while episode < train_num_episode:
@@ -92,25 +105,17 @@ class Trainer:
             # Chọn ngẫu nhiên một môi trường để huấn luyện (MTL setup)
             env = random.sample(self.envs, 1)[0](**self.env_params)
             data = env.get_random_problems(batch_size, self.env_params["problem_size"])
-            
-            avg_score, loss_dict = self._train_one_batch(data, env)
+            avg_score, avg_loss = self._train_one_batch(data, env)
             
             score_AM.update(avg_score, batch_size)
-            loss_AM.update(loss_dict['total_loss'], batch_size)
-            rl_loss_AM.update(loss_dict['rl_loss'], batch_size)
-            guidance_loss_AM.update(loss_dict['guidance_loss'], batch_size)
-            recon_loss_AM.update(loss_dict['recon_loss'], batch_size)
-            contrast_loss_AM.update(loss_dict['contrast_loss'], batch_size)
-            alpha_AM.update(loss_dict['alpha'], batch_size)
-            
+            loss_AM.update(avg_loss, batch_size)
             episode += batch_size
 
         # Log Once, for each epoch
-        print('Epoch {:3d}: Train ({:3.0f}%)  Score: {:.4f},  Total Loss: {:.4f}'.format(
+        print('Epoch {:3d}: Train ({:3.0f}%)  Score: {:.4f},  Loss: {:.4f}'.format(
             epoch, 100. * episode / train_num_episode, score_AM.avg, loss_AM.avg))
-        print('           RL: {:.4f}, Guidance: {:.4f}, Recon: {:.4f}, Contrast: {:.4f}, Alpha: {:.4f}'.format(
-            rl_loss_AM.avg, guidance_loss_AM.avg, recon_loss_AM.avg, contrast_loss_AM.avg, alpha_AM.avg))
-
+        self.train_logger.writerow([epoch, score_AM.avg, loss_AM.avg])
+        self.train_log_file.flush()
         return score_AM.avg, loss_AM.avg
 
     def _train_one_batch(self, data, env):
@@ -118,181 +123,111 @@ class Trainer:
         self.model.set_eval_type(self.model_params["eval_type"])
         batch_size = data.size(0) if isinstance(data, torch.Tensor) else data[-1].size(0)
         
-        # Prep: Load problem and pre_forward
+        # ========================================
+        # PREP: Load problems và pre_forward
+        # ========================================
         env.load_problems(batch_size, problems=data, aug_factor=1)
         reset_state, _, _ = env.reset()
-        self.model.pre_forward(reset_state)
+        self.model.pre_forward(reset_state)  # Tính toán slots & original_features
         
-        # Storage for episode trajectory
         prob_list = torch.zeros(size=(batch_size, env.pomo_size, 0), device=self.device)
-        
-        # MEMORY-EFFICIENT: Only store minimal info for guidance loss
-        if self.model.use_diffusion_guidance:
-            visited_mask_list = []  # Only store visited mask
-            encoded_last_list = []  # Precompute encoded nodes
-            attr_list = []  # Store attributes
-            guidance_scores_list = []
-            action_list = []  # Store actions
-        
-        # POMO Rollout
+
+        # ========================================
+        # POMO ROLLOUT (Nhánh 1: VRP Policy)
+        # ========================================
         state, reward, done = env.pre_step()
         while not done:
-            current_selected_count = state.selected_count
-            selected, prob, guidance_scores = self.model(state)
-            # shape: (batch, pomo)
-            
-            # Store action
-            if self.model.use_diffusion_guidance:
-                if current_selected_count >= 2:
-                   encoded_last_node = _get_encoding(self.model.encoded_nodes, state.current_node)
-                   attr = torch.cat(
-                         (state.load[:, :, None], state.current_time[:, :, None],
-                           state.length[:, :, None], state.open[:, :, None]), 
-                         dim=2
-                    )
-                   visited_mask = (state.ninf_mask == float('-inf'))
-                   visited_mask_list.append(visited_mask.clone())
-                   encoded_last_list.append(encoded_last_node.clone())
-                   attr_list.append(attr.clone())
-                   action_list.append(selected.clone())
-                   guidance_scores_list.append(guidance_scores.clone())
-            
+            selected, prob = self.model(state)
             state, reward, done = env.step(selected)
             prob_list = torch.cat((prob_list, prob[:, :, None]), dim=2)
 
-        # ===================================================================
+        # ========================================
         # LOSS COMPUTATION
-        # ===================================================================
+        # ========================================
+        loss_dict = {}  # Để tracking từng loss component
         
-        # 1. REINFORCE Loss (RL Loss)
-        advantage = reward - reward.float().mean(dim=1, keepdims=True)  # (batch, pomo)
+        # 1. REINFORCE Loss (RL Loss) - Nhánh 1
+        advantage = reward - reward.float().mean(dim=1, keepdims=True)
         log_prob = prob_list.log().sum(dim=2)
-        rl_loss = -advantage * log_prob  # Minus Sign: To Increase REWARD
+        rl_loss = -advantage * log_prob
         rl_loss_mean = rl_loss.mean()
+        loss_dict['rl'] = rl_loss_mean.item()
 
-        max_pomo_reward, _ = reward.max(dim=1)  # get best results from pomo
-        score_mean = -max_pomo_reward.float().mean()  # negative sign to make positive value
+        # Score cho logging
+        max_pomo_reward, _ = reward.max(dim=1)
+        score_mean = -max_pomo_reward.float().mean()
 
+        # Total loss bắt đầu với RL loss
         total_loss = rl_loss_mean
-        
-        # 2. Diffusion Guidance Loss (NEW)
-        guidance_loss_mean = torch.tensor(0.0, device=self.device)
-        if self.lambda_guidance > 0.0 and self.model.use_diffusion_guidance and len(action_list) > 0:
+
+        # ========================================
+        # 2. SLOT DIFFUSION LOSS - Nhánh 2 (MỚI!)
+        # ========================================
+        if self.lambda_diffusion > 0.0:
             try:
-                # Compute baseline (average reward across pomo)
-                baseline = reward.float().mean(dim=1, keepdims=True)  # (batch, 1)
-                
-                # Compute guidance loss for sampled steps (not all steps to save time)
-                num_steps = len(action_list)
-                sample_interval = max(1, num_steps // 20)  # Sample ~20 steps
-                sampled_indices = range(0, num_steps, sample_interval)
-                
-                guidance_loss_list_final = []
-                for step_idx in sampled_indices:
-                    step_action = action_list[step_idx]
-                    step_guidance_scores = guidance_scores_list[step_idx]
-                    
-                    # TÍNH LOSS TRỰC TIẾP TẠI ĐÂY
-                    advantage = (reward - baseline).detach()
-                    batch_size = step_action.size(0)
-                    pomo_size = step_action.size(1)
-                    batch_idx = torch.arange(batch_size, device=self.device)[:, None].expand(-1, pomo_size)
-                    pomo_idx = torch.arange(pomo_size, device=self.device)[None, :].expand(batch_size, -1)
-                    
-                    # Compute guidance loss
-                    selected_guidance = step_guidance_scores[batch_idx, pomo_idx, step_action]
-                    step_guidance_loss = -(advantage * selected_guidance).mean()
-
-                    guidance_loss_list_final.append(step_guidance_loss)
-                
-                # Average across sampled steps
-                guidance_loss_mean = sum(guidance_loss_list_final) / len(guidance_loss_list_final)
-                total_loss = total_loss + self.lambda_guidance * guidance_loss_mean
-                
+                diffusion_loss = self.model.compute_slot_diffusion_loss()
+                total_loss = total_loss + self.lambda_diffusion * diffusion_loss
+                loss_dict['diffusion'] = diffusion_loss.item()
             except Exception as e:
-                print(f"\nWarning: Guidance loss skipped due to error: {e}", end="")
+                print(f" [Warning: Diffusion loss failed: {e}]", end="")
+                loss_dict['diffusion'] = 0.0
 
-        # 3. Slot Reconstruction Loss
-        recon_loss_mean = torch.tensor(0.0, device=self.device)
+        # ========================================
+        # 3. SLOT RECONSTRUCTION LOSS (Legacy, optional)
+        # ========================================
         if self.lambda_recon > 0.0:
             try:
-                recon_loss_mean = self.model.compute_slot_reconstruction_loss(reset_state)
-                total_loss = total_loss + self.lambda_recon * recon_loss_mean
+                recon_loss = self.model.compute_slot_reconstruction_loss(reset_state)
+                total_loss = total_loss + self.lambda_recon * recon_loss
+                loss_dict['recon'] = recon_loss.item()
             except Exception as e:
-                print(f"\nWarning: Reconstruction loss skipped due to error: {e}", end="")
+                print(f" [Warning: Recon loss failed: {e}]", end="")
+                loss_dict['recon'] = 0.0
 
-        # 4. Slot Contrastive Loss
-        contrast_loss_mean = torch.tensor(0.0, device=self.device)
-        if self.lambda_contrast > 0.0:
+        # ========================================
+        # 4. SLOT CONTRASTIVE LOSS
+        # ========================================
+        if self.lambda_contrastive > 0.0:
             try:
-                contrast_loss_mean = self.model.compute_slot_contrastive_loss()
-                total_loss = total_loss + self.lambda_contrast * contrast_loss_mean
+                contrastive_loss = self.model.compute_slot_contrastive_loss()
+                total_loss = total_loss + self.lambda_contrastive * contrastive_loss
+                loss_dict['contrastive'] = contrastive_loss.item()
             except Exception as e:
-                print(f"\nWarning: Contrastive loss skipped due to error: {e}", end="")
+                print(f" [Warning: Contrastive loss failed: {e}]", end="")
+                loss_dict['contrastive'] = 0.0
 
-        # 5. Aux Loss (MoE Load Balancing, if exists)
+        # ========================================
+        # 5. AUX LOSS (MoE Load Balancing, nếu có)
+        # ========================================
         if hasattr(self.model, "aux_loss"):
             total_loss = total_loss + self.model.aux_loss
+            loss_dict['aux'] = self.model.aux_loss.item()
 
-        # Backward and Step
+        # ========================================
+        # BACKWARD & OPTIMIZE
+        # ========================================
         self.model.zero_grad()
         total_loss.backward()
-        
-        # Gradient clipping (optional but recommended for diffusion)
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-        
         self.optimizer.step()
 
-        # Get current alpha value for logging
-        current_alpha = 0.0
-        if self.model.use_diffusion_guidance:
-            current_alpha = torch.sigmoid(self.model.guidance_alpha).item()
+        # ========================================
+        # LOGGING (Chi tiết loss components)
+        # ========================================
+        #loss_str = " | ".join([f"{k}: {v:.4f}" for k, v in loss_dict.items() if v > 0])
+        #print(f" [{loss_str}]", end="")
 
-        # Return loss dict
-        loss_dict = {
-            'total_loss': total_loss.item(),
-            'rl_loss': rl_loss_mean.item(),
-            'guidance_loss': guidance_loss_mean.item() if isinstance(guidance_loss_mean, torch.Tensor) else guidance_loss_mean,
-            'recon_loss': recon_loss_mean.item() if isinstance(recon_loss_mean, torch.Tensor) else recon_loss_mean,
-            'contrast_loss': contrast_loss_mean.item() if isinstance(contrast_loss_mean, torch.Tensor) else contrast_loss_mean,
-            'alpha': current_alpha
-        }
-
-        return score_mean.item(), loss_dict
-
-    def _clone_state(self, state):
-        """
-        Clone Step_State for guidance loss computation.
-        Based on Step_State dataclass from CVRPEnv.
-        
-        NOTE: This function is now DEPRECATED in favor of memory-efficient approach.
-        We now store minimal state info (visited_mask, encoded_last, attr) instead
-        of cloning entire Step_State to save memory.
-        """
-        from dataclasses import fields
-        
-        # Create new Step_State instance
-        cloned_state = type(state)()
-        
-        # Clone all fields
-        for field in fields(state):
-            val = getattr(state, field.name)
-            if isinstance(val, torch.Tensor):
-                setattr(cloned_state, field.name, val.clone())
-            else:
-                # For non-tensor fields (int, str, etc.), just copy reference
-                setattr(cloned_state, field.name, val)
-        
-        return cloned_state
+        return score_mean.item(), total_loss.item()
 
     def _val_one_batch(self, data, env, aug_factor=1, eval_type="argmax"):
         self.model.eval()
         self.model.set_eval_type(eval_type)
         batch_size = data.size(0) if isinstance(data, torch.Tensor) else data[-1].size(0)
+        
         with torch.no_grad():
             env.load_problems(batch_size, problems=data, aug_factor=aug_factor)
             reset_state, _, _ = env.reset()
             self.model.pre_forward(reset_state)
+            
             state, reward, done = env.pre_step()
             while not done:
                 selected, _ = self.model(state)
