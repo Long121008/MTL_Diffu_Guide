@@ -291,6 +291,7 @@ class SlotDiffMOEModel(nn.Module):
     """
     def __init__(self, **model_params):
         super().__init__()
+        
         self.model_params = model_params
         self.eval_type = model_params['eval_type']
         self.problem = model_params['problem']
@@ -329,8 +330,8 @@ class SlotDiffMOEModel(nn.Module):
         self.encoded_nodes = None
         self.slots = None
         self.original_features = None
-        self.device = torch.device('cuda', torch.cuda.current_device()) if 'device' not in model_params.keys() else model_params['device']
-
+        # self.device = torch.device('cuda', torch.cuda.current_device()) if 'device' not in model_params.keys() else model_params['device']
+        self.device = "cpu"
     def pre_forward(self, reset_state):
         depot_xy = reset_state.depot_xy
         node_xy = reset_state.node_xy

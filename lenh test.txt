@@ -1,0 +1,10 @@
+python test.py --problem=ALL --model_type=SlotDiffMOEModel --num_experts=4 \
+--routing_level=node --routing_method=input_choice \
+--test_episodes 100 \
+--enable_slot_diffusion --slot_num 32 --checkpoint="epoch-5000.pt"
+
+
+python test.py --problem=ALL --model_type=SlotDiffMOEModel --num_experts=4 \
+--routing_level=node --routing_method=input_choice \
+--test_episodes 100 \
+ --slot_num 32 --checkpoint="epoch-5000_no_diff.pt"

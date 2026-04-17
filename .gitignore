@@ -20,3 +20,11 @@ results/
 results_old/
 pretrained/
 
+
+
+*.pt
+
+*/*.pt
+
+
+*.csv

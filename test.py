@@ -11,7 +11,8 @@ from utils import *
 def args2dict(args):
     env_params = {
         "problem_size": args.problem_size, 
-        "pomo_size": args.pomo_size
+        "pomo_size": args.pomo_size,
+        "device": "cpu"
     }
     
     model_params = {

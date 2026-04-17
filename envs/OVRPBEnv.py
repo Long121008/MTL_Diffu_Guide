@@ -446,7 +446,6 @@ class OVRPBEnv:
             return depot_xy, node_xy, node_demand, capacity
 
     def augment_xy_data_by_8_fold(self, xy_data):
-        # xy_data.shape: (batch, N, 2)
 
         x = xy_data[:, :, [0]]
         y = xy_data[:, :, [1]]

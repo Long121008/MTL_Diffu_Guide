@@ -3,7 +3,8 @@ from torch.optim import Adam as Optimizer
 import csv
 import envs
 from utils import *
-
+from scipy.optimize import linear_sum_assignment
+from experiment.ablation.slot_consistency import SlotConsistency
 
 class Tester:
     def __init__(self, args, env_params, model_params, tester_params):
@@ -14,7 +15,6 @@ class Tester:
         self.model_params = model_params
         self.tester_params = tester_params
 
-        # ENV, MODEL, & Load checkpoint
         self.envs = get_env(self.args.problem)  # Env Class
         self.device = args.device
         self.checkpoint = torch.load(args.checkpoint, map_location=self.device, weights_only=False)
@@ -34,9 +34,9 @@ class Tester:
                 if os.path.isdir(tester_params['test_set_path']) else [tester_params['test_set_path']]
             assert self.path_list[-1].endswith(".vrp") or self.path_list[-1].endswith(".txt"), "Unsupported file types."
 
-        # utility
+        self.slot_eval = SlotConsistency(self.args, self.env_params, self.device)
         self.time_estimator = TimeEstimator()
-
+    
     def run(self):
         for env_class in self.envs:
             start_time = time.time()
@@ -127,7 +127,8 @@ class Tester:
                     ])
                 
                 print(f"Results saved to {result_file}")
-
+                self.slot_eval.run(model, env)
+                
         return scores, aug_scores
 
     def _test_one_batch(self, model, test_data, env):
