@@ -60,9 +60,24 @@ class Trainer:
         # utility
         self.time_estimator = TimeEstimator()
         
+        # Determine which problems are being trained on
+        self.training_problem_names = sorted(set(
+            env_cls(**self.env_params).problem for env_cls in self.envs
+        ))
+        
+        # Build detailed CSV header
+        csv_header = ['epoch', 'lr', 'score', 'loss']
+        # Per-component losses
+        csv_header += ['loss_rl', 'loss_diffusion', 'loss_recon', 'loss_contrastive', 'loss_aux']
+        # Per-problem scores and batch counts
+        for pname in self.training_problem_names:
+            csv_header.append(f'score_{pname}')
+        for pname in self.training_problem_names:
+            csv_header.append(f'count_{pname}')
+        
         self.train_log_file = open(f"{self.log_path}/train_log.csv", 'w', newline='')
         self.train_logger = csv.writer(self.train_log_file)
-        self.train_logger.writerow(['epoch', 'score', 'loss'])
+        self.train_logger.writerow(csv_header)
 
     def run(self):
         self.time_estimator.reset(self.start_epoch)
@@ -98,6 +113,12 @@ class Trainer:
         score_AM, loss_AM = AverageMeter(), AverageMeter()
         train_num_episode = self.trainer_params['train_episodes']
 
+        # Per-problem score trackers
+        problem_score_AMs = {pname: AverageMeter() for pname in self.training_problem_names}
+        # Per-component loss trackers
+        loss_component_names = ['rl', 'diffusion', 'recon', 'contrastive', 'aux']
+        loss_component_AMs = {name: AverageMeter() for name in loss_component_names}
+
         while episode < train_num_episode:
             remaining = train_num_episode - episode
             batch_size = min(self.trainer_params['train_batch_size'], remaining)
@@ -105,16 +126,42 @@ class Trainer:
             # Chọn ngẫu nhiên một môi trường để huấn luyện (MTL setup)
             env = random.sample(self.envs, 1)[0](**self.env_params)
             data = env.get_random_problems(batch_size, self.env_params["problem_size"])
-            avg_score, avg_loss = self._train_one_batch(data, env)
+            avg_score, avg_loss, problem_name, loss_dict = self._train_one_batch(data, env)
             
             score_AM.update(avg_score, batch_size)
             loss_AM.update(avg_loss, batch_size)
+            
+            # Track per-problem score
+            if problem_name in problem_score_AMs:
+                problem_score_AMs[problem_name].update(avg_score, batch_size)
+            
+            # Track per-component losses
+            for comp_name in loss_component_names:
+                if comp_name in loss_dict:
+                    loss_component_AMs[comp_name].update(loss_dict[comp_name], batch_size)
+            
             episode += batch_size
 
         # Log Once, for each epoch
+        current_lr = self.optimizer.param_groups[0]['lr']
         print('Epoch {:3d}: Train ({:3.0f}%)  Score: {:.4f},  Loss: {:.4f}'.format(
             epoch, 100. * episode / train_num_episode, score_AM.avg, loss_AM.avg))
-        self.train_logger.writerow([epoch, score_AM.avg, loss_AM.avg])
+        
+        # Build detailed CSV row
+        row = [epoch, current_lr, score_AM.avg, loss_AM.avg]
+        # Per-component losses (use empty string if no data)
+        for comp_name in loss_component_names:
+            am = loss_component_AMs[comp_name]
+            row.append(am.avg if am.count > 0 else '')
+        # Per-problem scores
+        for pname in self.training_problem_names:
+            am = problem_score_AMs[pname]
+            row.append(am.avg if am.count > 0 else '')
+        # Per-problem batch counts
+        for pname in self.training_problem_names:
+            row.append(problem_score_AMs[pname].count)
+        
+        self.train_logger.writerow(row)
         self.train_log_file.flush()
         return score_AM.avg, loss_AM.avg
 
@@ -216,7 +263,7 @@ class Trainer:
         #loss_str = " | ".join([f"{k}: {v:.4f}" for k, v in loss_dict.items() if v > 0])
         #print(f" [{loss_str}]", end="")
 
-        return score_mean.item(), total_loss.item()
+        return score_mean.item(), total_loss.item(), env.problem, loss_dict
 
     def _val_one_batch(self, data, env, aug_factor=1, eval_type="argmax"):
         self.model.eval()
