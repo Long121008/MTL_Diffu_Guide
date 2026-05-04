@@ -216,7 +216,9 @@ class CVRPEnv:
         # shape: (batch, problem+1, 2)
         depot_demand = torch.zeros(size=(self.batch_size, 1)).to(self.device)
         # shape: (batch, 1)
-        self.depot_node_demand = torch.cat((depot_demand, node_demand), dim=1)
+        # Sửa dòng 219 thành:
+        self.depot_node_demand = torch.cat((depot_demand.to(self.device), node_demand.to(self.device)), dim=1)
+
         # shape: (batch, problem+1)
 
         self.BATCH_IDX = torch.arange(self.batch_size)[:, None].expand(self.batch_size, self.pomo_size).to(self.device)

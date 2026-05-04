@@ -345,7 +345,6 @@ class SlotDiffMOEModel(nn.Module):
         )
         
         self.original_features = node_xy_demand_tw
-        self._last_depot_xy = depot_xy  # Cache để dùng trong consistency loss
         
         self.encoded_nodes, moe_loss = self.encoder(depot_xy, node_xy_demand_tw)
         self.aux_loss = moe_loss
@@ -452,12 +451,7 @@ class SlotDiffMOEModel(nn.Module):
         return recon_loss
     
     def compute_slot_contrastive_loss(self):
-        """
-        Diversity Loss — L_diversity trong paper:
-            L_diversity = sum_{i!=j} (S_i · S_j) / (||S_i|| ||S_j||)
-        Buộc các slots phải capture các cluster/region khác nhau,
-        không bị collapse về cùng một representation.
-        """
+        """Contrastive Loss for slot diversity"""
         if self.slots is None:
             return torch.tensor(0.0, device=self.device)
         
@@ -468,135 +462,9 @@ class SlotDiffMOEModel(nn.Module):
         mask = torch.eye(K, device=self.device).unsqueeze(0).expand(batch, -1, -1)
         off_diag_sim = similarity * (1 - mask)
         
-        # Sum of cosine similarities between different slots (squared to penalize both pos & neg)
         contrastive_loss = (off_diag_sim ** 2).sum() / (batch * K * (K - 1))
         
         return contrastive_loss
-
-    @staticmethod
-    def _augment_instance(node_xy_demand_tw, depot_xy, jitter_std=0.01):
-        """
-        Augmentation: Random Rotation + Small Gaussian Jitter
-        - Rotation invariant: VRP optimal solution không đổi khi rotate
-        - Jitter nhỏ: tăng robustness, không phá cluster structure
-        
-        Args:
-            node_xy_demand_tw: (B, N, 5) — node features [x, y, demand, tw_s, tw_e]
-            depot_xy: (B, 1, 2) — depot coordinates
-            jitter_std: standard deviation của Gaussian noise (~0.01 cho coords normalize [0,1])
-        Returns:
-            augmented node_xy_demand_tw, augmented depot_xy (cùng shape)
-        """
-        import math
-        B = node_xy_demand_tw.size(0)
-        device = node_xy_demand_tw.device
-
-        # --- Random rotation angle cho mỗi instance trong batch ---
-        theta = torch.rand(B, device=device) * 2 * math.pi  # (B,)
-        cos_t = torch.cos(theta)  # (B,)
-        sin_t = torch.sin(theta)  # (B,)
-
-        def rotate_xy(coords):
-            # coords: (B, N, 2) hoặc (B, 1, 2)
-            x = coords[..., 0]  # (B, N)
-            y = coords[..., 1]  # (B, N)
-            x_rot = cos_t.unsqueeze(1) * x - sin_t.unsqueeze(1) * y
-            y_rot = sin_t.unsqueeze(1) * x + cos_t.unsqueeze(1) * y
-            return torch.stack([x_rot, y_rot], dim=-1)
-
-        # Rotate node coords (chỉ x, y — không rotate demand/tw)
-        node_xy_rot = rotate_xy(node_xy_demand_tw[..., :2])
-        # Add small jitter lên coords
-        node_xy_jitter = node_xy_rot + torch.randn_like(node_xy_rot) * jitter_std
-        # Giữ nguyên demand và time windows
-        aug_node = torch.cat([node_xy_jitter, node_xy_demand_tw[..., 2:]], dim=-1)
-
-        # Rotate depot coords
-        depot_rot = rotate_xy(depot_xy)
-        depot_jitter = depot_rot + torch.randn_like(depot_rot) * jitter_std
-
-        return aug_node, depot_jitter
-
-    @staticmethod
-    def _hungarian_match_slots(slots_a, slots_b):
-        """
-        Hungarian matching để align slots giữa 2 lần forward pass.
-        Slots không có thứ tự cố định → phải match trước khi tính MSE.
-        
-        Args:
-            slots_a: (B, K, D) — slots từ instance gốc X
-            slots_b: (B, K, D) — slots từ instance augmented X̃
-        Returns:
-            slots_b_matched: (B, K, D) — slots_b được reorder để align với slots_a
-        """
-        from scipy.optimize import linear_sum_assignment
-        import numpy as np
-
-        B, K, D = slots_a.shape
-        slots_b_matched = slots_b.clone()
-
-        # Normalize để tính cosine similarity
-        a_norm = F.normalize(slots_a, dim=-1)  # (B, K, D)
-        b_norm = F.normalize(slots_b, dim=-1)  # (B, K, D)
-
-        # Cost matrix = negative cosine similarity (K x K per instance)
-        cost_matrix = -torch.bmm(a_norm, b_norm.transpose(1, 2))  # (B, K, K)
-        cost_np = cost_matrix.detach().cpu().numpy()
-
-        for i in range(B):
-            # Hungarian algorithm tìm optimal assignment
-            row_ind, col_ind = linear_sum_assignment(cost_np[i])
-            # Reorder slots_b theo assignment
-            slots_b_matched[i] = slots_b[i, col_ind]
-
-        return slots_b_matched
-
-    def compute_slot_consistency_loss(self, jitter_std=0.01):
-        """
-        Consistency Loss — L_consistency trong paper:
-            L_consistency = ||S(X) - S(X̃)||²
-        
-        Enforce rằng slot representation stable dưới augmentation (rotation + jitter).
-        Dùng Hungarian matching để align slots trước khi tính MSE
-        vì slots không có thứ tự cố định giữa 2 lần forward pass.
-        
-        Args:
-            jitter_std: noise level cho augmentation (default 0.01)
-        """
-        if self.slots is None or self.original_features is None:
-            return torch.tensor(0.0, device=self.device)
-
-        # Slots từ instance gốc (đã được compute ở pre_forward)
-        slots_orig = self.slots  # (B, K, D)
-
-        # Lấy depot coords từ encoded_nodes (depot là node đầu tiên)
-        # original_features chỉ có customer nodes → cần depot riêng
-        # Ta dùng self._last_depot_xy được save ở pre_forward
-        if not hasattr(self, '_last_depot_xy') or self._last_depot_xy is None:
-            return torch.tensor(0.0, device=self.device)
-
-        depot_xy = self._last_depot_xy      # (B, 1, 2)
-        node_feats = self.original_features  # (B, N, 5)
-
-        # --- Augment instance ---
-        aug_node, aug_depot = self._augment_instance(node_feats, depot_xy, jitter_std)
-
-        # --- Forward pass qua encoder với augmented instance ---
-        with torch.no_grad():
-            # Chỉ cần encoder + slot attention, không cần full forward
-            aug_encoded, _ = self.encoder(aug_depot, aug_node)
-        # Lấy slots từ augmented instance
-        slots_aug = self.encoder.slot_attention_module.last_slots  # (B, K, D)
-
-        # --- Hungarian matching để align slots ---
-        slots_aug_matched = self._hungarian_match_slots(
-            slots_orig.detach(), slots_aug
-        )
-
-        # --- MSE loss sau khi match ---
-        consistency_loss = F.mse_loss(slots_orig, slots_aug_matched)
-
-        return consistency_loss
 
 
 def _get_encoding(encoded_nodes, node_index_to_pick):

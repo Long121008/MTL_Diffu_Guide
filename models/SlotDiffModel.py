@@ -528,6 +528,19 @@ class MTL_Encoder(nn.Module):
 # =========================================================================
 
 class MTL_Decoder(nn.Module):
+    """
+    Slot-Augmented Pointer Decoder (no MoE version)
+
+    Key change vs old decoder:
+    - OLD: gate blends embeddings → single pointer → scores
+    - NEW: two separate pointers (nodes & slots) each produce scores directly,
+           then gate blends the two score distributions at score level
+
+    Intuition:
+    - score_nodes[i]: how relevant is node i based on LOCAL context
+    - score_slots[i]: how relevant is node i based on GLOBAL structure
+    - gate learns WHEN to trust global structure more than local context
+    """
     def __init__(self, **model_params):
         super().__init__()
         self.model_params = model_params
@@ -535,27 +548,38 @@ class MTL_Decoder(nn.Module):
         head_num = model_params['head_num']
         qkv_dim = model_params['qkv_dim']
 
+        # Query projection (shared for both pointers)
         self.Wq_last = nn.Linear(embedding_dim + 4, head_num * qkv_dim, bias=False)
-        
-        # Node attention
+
+        # ── Node Pointer ──
         self.Wk_nodes = nn.Linear(embedding_dim, head_num * qkv_dim, bias=False)
         self.Wv_nodes = nn.Linear(embedding_dim, head_num * qkv_dim, bias=False)
-        
-        # Slot attention
+
+        # ── Slot Pointer ──
         self.Wk_slots = nn.Linear(embedding_dim, head_num * qkv_dim, bias=False)
         self.Wv_slots = nn.Linear(embedding_dim, head_num * qkv_dim, bias=False)
-        
-        # Gating mechanism
+
+        # ── Slot → Node Score Projection ──
+        self.slot_pointer_proj = nn.Linear(head_num * qkv_dim, embedding_dim)
+
+        # ── Separate node key for slot pointer ──
+        self.Wk_node_for_slot = nn.Linear(embedding_dim, embedding_dim, bias=False)
+
+        # ── Score-level Gate (capped [0, 0.3]) ──
         self.slot_gate = nn.Linear(embedding_dim + 4, 1)
-        
+        self.slot_gate_cap = 0.3
+
         # Multi-head combine (Pure Linear, no MOE)
         self.multi_head_combine = nn.Linear(head_num * qkv_dim, embedding_dim)
 
+        # Cached keys/values
         self.k_nodes = None
         self.v_nodes = None
         self.k_slots = None
         self.v_slots = None
         self.single_head_key = None
+        self.node_key_for_slot_pointer = None
+        self.slot_node_bias = None
         self.slots = None
 
     def set_kv(self, encoded_nodes, slots=None):
@@ -564,46 +588,63 @@ class MTL_Decoder(nn.Module):
         self.k_nodes = reshape_by_heads(self.Wk_nodes(encoded_nodes), head_num=head_num)
         self.v_nodes = reshape_by_heads(self.Wv_nodes(encoded_nodes), head_num=head_num)
         self.single_head_key = encoded_nodes.transpose(1, 2)
-        
+        self.node_key_for_slot_pointer = self.Wk_node_for_slot(encoded_nodes).transpose(1, 2)
+
         if slots is not None:
             self.slots = slots
             self.k_slots = reshape_by_heads(self.Wk_slots(slots), head_num=head_num)
             self.v_slots = reshape_by_heads(self.Wv_slots(slots), head_num=head_num)
 
+            # Slot-Node structural bias: scale by sqrt(D) + tanh clamp → safe range
+            import math
+            scale = math.sqrt(slots.size(-1))
+            self.slot_node_bias = torch.matmul(slots, encoded_nodes.transpose(1, 2)) / scale
+            self.slot_node_bias = torch.tanh(self.slot_node_bias)
+            self.slot_node_bias = self.slot_node_bias.mean(dim=1, keepdim=True)  # (B, 1, N)
+
     def forward(self, encoded_last_node, attr, ninf_mask):
         head_num = self.model_params['head_num']
-
-        input_cat = torch.cat((encoded_last_node, attr), dim=2)
-        q_last = reshape_by_heads(self.Wq_last(input_cat), head_num=head_num)
-
-        # Attention to nodes
-        out_concat_nodes = multi_head_attention(q_last, self.k_nodes, self.v_nodes, rank3_ninf_mask=ninf_mask)
-
-        # Attention to slots (if available)
-        if self.slots is not None:
-            out_concat_slots = multi_head_attention(q_last, self.k_slots, self.v_slots)
-            
-            # Gating mechanism
-            gate_logit = self.slot_gate(input_cat)
-            gate_weight = torch.sigmoid(gate_logit)
-            
-            # Weighted combination
-            out_concat = gate_weight * out_concat_slots + (1 - gate_weight) * out_concat_nodes
-        else:
-            out_concat = out_concat_nodes
-
-        # Multi-head combine
-        mh_atten_out = self.multi_head_combine(out_concat)
-
-        # Single-head attention for probability
-        score = torch.matmul(mh_atten_out, self.single_head_key)
-
         sqrt_embedding_dim = self.model_params['sqrt_embedding_dim']
         logit_clipping = self.model_params['logit_clipping']
 
-        score_scaled = score / sqrt_embedding_dim
-        score_clipped = logit_clipping * torch.tanh(score_scaled)
-        score_masked = score_clipped + ninf_mask
+        input_cat = torch.cat((encoded_last_node, attr), dim=2)  # (B, pomo, D+4)
+        q_last = reshape_by_heads(self.Wq_last(input_cat), head_num=head_num)
+
+        # ── Nhánh 1: Node Pointer ──
+        out_concat_nodes = multi_head_attention(
+            q_last, self.k_nodes, self.v_nodes,
+            rank3_ninf_mask=ninf_mask
+        )
+        mh_atten_out_nodes = self.multi_head_combine(out_concat_nodes)  # (B, pomo, D)
+        score_nodes = torch.matmul(mh_atten_out_nodes, self.single_head_key)  # (B, pomo, N)
+
+        if self.slots is not None:
+            # ── Nhánh 2: Slot Pointer ──
+            out_concat_slots = multi_head_attention(q_last, self.k_slots, self.v_slots)
+            slot_context = self.slot_pointer_proj(out_concat_slots)  # (B, pomo, D)
+
+            # Slot residual: inject local state into slot context
+            slot_context = slot_context + encoded_last_node
+
+            # Slot scores over N nodes
+            score_slots = torch.matmul(slot_context, self.node_key_for_slot_pointer)  # (B, pomo, N)
+
+            # Add structural bias
+            score_slots = score_slots + self.slot_node_bias
+
+            # ── Score-level Gating (capped [0, 0.3]) ──
+            gate_weight = self.slot_gate_cap * torch.sigmoid(self.slot_gate(input_cat))
+
+            # Scale & clip both streams
+            score_nodes_scaled = logit_clipping * torch.tanh(score_nodes / sqrt_embedding_dim)
+            score_slots_scaled = logit_clipping * torch.tanh(score_slots / sqrt_embedding_dim)
+
+            # Blend first, mask once after (tránh gate * (-inf) = NaN)
+            score_combined = gate_weight * score_slots_scaled + (1 - gate_weight) * score_nodes_scaled
+            score_masked = score_combined + ninf_mask
+
+        else:
+            score_masked = logit_clipping * torch.tanh(score_nodes / sqrt_embedding_dim) + ninf_mask
 
         probs = F.softmax(score_masked, dim=2)
 

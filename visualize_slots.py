@@ -1,175 +1,190 @@
-import torch
-import matplotlib.pyplot as plt
-import matplotlib.patches as patches
-import numpy as np
 import os
-from scipy.spatial import ConvexHull
-from utils import get_model
-from models.SlotDiffModel import SlotDiffModel # Hoặc class mô hình của bạn
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+import torch
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
 
-def visualize_slots_fixed(checkpoint_path, model_type="SlotDiffModel", problem_size=50, num_plots=4, seed=2024):
-    """
-    Vẽ biểu đồ Slot với dữ liệu CỐ ĐỊNH (để so sánh giữa các epoch).
-    """
-    # 1. KHÓA SEED (QUAN TRỌNG NHẤT)
-    print(f">> Đang khóa Random Seed: {seed}")
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    np.random.seed(seed)
-    
-    # 2. Setup Device
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f">> Device: {device}")
+from models.SlotDiffMOEModel import SlotDiffMOEModel
+import envs  # Giả sử module envs của chú chứa tất cả các class môi trường
 
-    # 3. Load Model Params (Copy từ train.py)
-    model_params = {
-        'embedding_dim': 128,
-        'sqrt_embedding_dim': 128**0.5,
-        'encoder_layer_num': 6,
-        'decoder_layer_num': 1,
-        'qkv_dim': 16,
-        'head_num': 8,
-        'logit_clipping': 10,
-        'ff_hidden_dim': 512,
-        'eval_type': 'argmax',
-        'norm': 'instance',
-        'norm_loc': 'norm_last',
-        'num_experts': 4,
-        'topk': 2,
-        'expert_loc': [],
-        'routing_level': 'node',
-        'routing_method': 'input_choice',
-        'problem': 'CVRP',
-        
-        # Slot & Diffusion
-        'slot_num': 16,
-        'slot_iter_num': 3,
-        'enable_slot_diffusion': True,
-        'enable_slot_reconstruction': False,
-        'denoiser_heads': 4,
-        'denoiser_layers': 2,
-        'max_timesteps': 1000,
-    }
+# Vô hiệu hóa khả năng đẩy lên cuda của mọi Tensor
+torch.Tensor.cuda = lambda self, *args, **kwargs: self
+torch.nn.Module.cuda = lambda self, *args, **kwargs: self
 
-    print(">> Khởi tạo Model...")
-    if model_type == "SlotDiffModel":
-        model = SlotDiffModel(**model_params).to(device)
-    # else: model = SlotDiffMOEModel(**model_params).to(device)
+original_cat = torch.cat
+torch.cat = lambda tensors, dim=0, **kwargs: original_cat([t.cpu() for t in tensors], dim, **kwargs)
 
-    # 4. Load Checkpoint
-    print(f">> Loading checkpoint: {checkpoint_path}")
-    if os.path.exists(checkpoint_path):
-        checkpoint = torch.load(checkpoint_path, map_location=device)
-        model.load_state_dict(checkpoint['model_state_dict'], strict=False)
-    else:
-        print(f"ERROR: Không tìm thấy file {checkpoint_path}")
-        return
+def force_cpu_creation(func):
+    def wrapper(*args, **kwargs):
+        if 'device' in kwargs:
+            kwargs['device'] = 'cpu'
+        return func(*args, **kwargs)
+    return wrapper
 
+torch.ones = force_cpu_creation(torch.ones)
+torch.zeros = force_cpu_creation(torch.zeros)
+torch.tensor = force_cpu_creation(torch.tensor)
+
+def load_model_at_epoch(checkpoint_path, env_params, model_params, device):
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    model = SlotDiffMOEModel(**model_params).to(device)
+    model.load_state_dict(checkpoint['model_state_dict'], strict=True)
     model.eval()
+    return model
 
-    # 5. Tạo dữ liệu (Sẽ LUÔN GIỐNG NHAU nhờ seed)
-    batch_size = num_plots
+def plot_16_tasks_appendix(epoch, checkpoint_dir, env_params, base_model_params):
+    device = torch.device('cpu')
     
-    # Depot: [Batch, 1, 2] (Đã fix dimension)
-    depot_xy = torch.rand(batch_size, 1, 2).to(device)
+    # Danh sách 16 bài toán theo đúng Table 11
+    tasks = [
+        'CVRP', 'OVRP', 'VRPB', 'OVRPB', 'VRPL', 'OVRPL',
+        'VRPTW', 'OVRPTW', 'VRPBTW', 'OVRPBTW', 'VRPLTW', 'OVRPLTW',
+        'VRPBL', 'OVRPBL', 'VRPBLTW', 'OVRPBLTW'
+    ]
     
-    # Node: [Batch, N, 2]
-    node_xy = torch.rand(batch_size, problem_size, 2).to(device)
+    plt.style.use('seaborn-v0_8-whitegrid')
+    sns.set_context("paper", font_scale=1.2) # Chỉnh scale chữ nhỏ lại xíu cho grid 4x4
+    cmap = plt.get_cmap('hsv')
     
-    # Dummy features
-    node_demand = torch.rand(batch_size, problem_size).to(device)
-    node_tw_start = torch.zeros(batch_size, problem_size).to(device)
-    node_tw_end = torch.ones(batch_size, problem_size).to(device)
+    # Load model chung
+    ckpt_path = os.path.join(checkpoint_dir, f"epoch-{epoch}.pt")
+    model = load_model_at_epoch(ckpt_path, env_params, base_model_params, device)
 
-    class DummyState:
-        def __init__(self):
-            self.depot_xy = depot_xy
-            self.node_xy = node_xy
-            self.node_demand = node_demand
-            self.node_tw_start = node_tw_start
-            self.node_tw_end = node_tw_end
-    
-    reset_state = DummyState()
+    # KHỞI TẠO GRID 4x4 SIÊU TO KHỔNG LỒ
+    fig, axes = plt.subplots(4, 4, figsize=(24, 24))
+    axes = axes.flatten() # Ép thành mảng 1 chiều để dễ truy cập bằng index
 
-    # 6. Inference
-    print(">> Đang chạy Inference...")
-    with torch.no_grad():
-        model.pre_forward(reset_state)
-
-    # 7. Lấy Attention & Data
-    attn_weights = model.encoder.slot_attention_module.last_attention.cpu().numpy()
-    node_xy = node_xy.cpu().numpy()
-    depot_xy = depot_xy.cpu().numpy()
-
-    # 8. Vẽ hình
-    print(">> Đang vẽ hình...")
-    fig, axes = plt.subplots(1, num_plots, figsize=(6 * num_plots, 6))
-    if num_plots == 1: axes = [axes]
-    cmap = plt.get_cmap('tab20')
-
-    for b in range(num_plots):
-        ax = axes[b]
-        coords = node_xy[b] # [N, 2]
-        depot = depot_xy[b][0] # [2] (Lấy phần tử 0)
+    for idx, task_name in enumerate(tasks):
+        print(f">> Đang vẽ ô {idx+1}/16: {task_name}...")
         
-        # Lấy Slot ID
-        attn_b = attn_weights[b] # [Slots, N+1]
-        attn_nodes = attn_b[:, 1:] # [Slots, N]
-        node_slot_ids = np.argmax(attn_nodes, axis=0) 
+        # Lấy cái trục (axis) tương ứng cho bài toán này
+        ax = axes[idx]
         
-        # Vẽ Depot
-        ax.scatter(depot[0], depot[1], c='black', marker='*', s=300, label='Depot', zorder=20)
+        # Cập nhật problem trong model_params để MoE route đúng chuyên gia
+        model.problem = task_name
         
-        # Vẽ các cụm
-        unique_slots = np.unique(node_slot_ids)
-        for slot_id in unique_slots:
-            mask = (node_slot_ids == slot_id)
-            points = coords[mask]
-            color = cmap(slot_id / 20)
+        # Lấy class môi trường tương ứng
+        env_class_name = f"{task_name}Env"
+        if not hasattr(envs, env_class_name):
+            print(f"Bỏ qua {task_name} vì không tìm thấy class {env_class_name} trong module envs.")
+            ax.set_title(f"{task_name} (Not Found)", color='red')
+            ax.set_xticks([])
+            ax.set_yticks([])
+            continue
             
-            # Vẽ điểm
-            ax.scatter(points[:, 0], points[:, 1], c=[color], s=80, edgecolors='k', zorder=10)
+        env_class = getattr(envs, env_class_name)
+        env = env_class(**env_params)
+        
+        data_batch = env.get_random_problems(batch_size=1, problem_size=env_params['problem_size']) 
+        env.load_problems(1, data_batch)
+        reset_state, _, _ = env.reset()
+        
+        with torch.no_grad():
+            model.pre_forward(reset_state)
             
-            # Vẽ vùng bao (Convex Hull) - Có try/except
-            if len(points) >= 3:
-                try:
-                    hull = ConvexHull(points)
-                    hull_points = points[hull.vertices]
-                    poly = patches.Polygon(hull_points, closed=True, facecolor=color, alpha=0.2, edgecolor=color, linewidth=2, zorder=5)
-                    ax.add_patch(poly)
-                except Exception:
-                    pass 
+            attention = model.encoder.slot_attention_module.last_attention[0].cpu()
+            slot_assignments = attention.argmax(dim=0).numpy()
             
-            # Vẽ nhãn S_id
-            if len(points) > 0:
-                center = points.mean(axis=0)
-                ax.text(center[0], center[1], f"S{slot_id}", fontsize=12, fontweight='bold', 
-                        color='black', ha='center', va='center',
-                        bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', pad=1), zorder=30)
+            coords = torch.cat((reset_state.depot_xy[0], reset_state.node_xy[0]), dim=0).cpu().numpy()
+            demands = np.abs(reset_state.node_demand[0].cpu().numpy())
+            node_sizes = 30 + demands * 350 
+            
+            # Xáo trộn màu để các slot tách bạch
+            hashed_assignments = (slot_assignments[1:] * 17) % base_model_params['slot_num']
+            colors = cmap(hashed_assignments / base_model_params['slot_num'])
+            
+            # Phân tách Maker: Tròn cho Linehaul, Vuông cho Backhaul (nếu có)
+            markers = ['o'] * len(coords[1:])
+            if 'B' in task_name and hasattr(reset_state, 'backhaul_mask'):
+                bh_mask = reset_state.backhaul_mask[0].cpu().numpy()
+                for i, is_bh in enumerate(bh_mask[1:]):
+                    if is_bh: markers[i] = 's' # Square cho Backhaul
+            
+            # Vẽ từng điểm để có thể custom marker
+            for i in range(len(coords[1:])):
+                ax.scatter(coords[i+1, 0], coords[i+1, 1], 
+                           color=colors[i], marker=markers[i],
+                           s=node_sizes[i], alpha=0.9, edgecolors='white', linewidth=1.5, zorder=4)
+                
+                # Thể hiện Time Window nếu có TW
+                if 'TW' in task_name and hasattr(reset_state, 'node_tw_start'):
+                    tw_start = reset_state.node_tw_start[0, i].item()
+                    tw_end = reset_state.node_tw_end[0, i].item()
+                    if i % 3 == 0: 
+                        ax.text(coords[i+1, 0]+0.015, coords[i+1, 1]+0.015, f"[{tw_start:.1f}-{tw_end:.1f}]", 
+                                fontsize=8, color='gray', zorder=6)
+            
+            # Depot
+            ax.scatter(coords[0, 0], coords[0, 1], c='black', marker='*', s=400, edgecolors='white', zorder=5, label="Depot")
+            
+            # Vẽ Mạng nhện (Spider Web)
+            unique_slots = np.unique(slot_assignments[1:])
+            for slot_id in unique_slots:
+                points_in_slot = coords[1:][slot_assignments[1:] == slot_id]
+                hash_id = (slot_id * 17) % base_model_params['slot_num']
+                color = cmap(hash_id / base_model_params['slot_num'])
+                
+                if len(points_in_slot) >= 2:
+                    centroid = points_in_slot.mean(axis=0)
+                    ax.scatter(centroid[0], centroid[1], color=color, marker='X', s=120, edgecolors='black', linewidth=1, zorder=3)
+                    for pt in points_in_slot:
+                        ax.plot([centroid[0], pt[0]], [centroid[1], pt[1]], color=color, linestyle='--', lw=1.5, alpha=0.5, zorder=2)
+                elif len(points_in_slot) == 1:
+                    ax.scatter(points_in_slot[0, 0], points_in_slot[0, 1], facecolors='none', edgecolors=color, s=node_sizes[slot_assignments[1:] == slot_id] + 80, lw=2.5, zorder=2)
 
-        ax.set_title(f"Sample {b+1}", fontsize=14)
-        ax.set_xlim(-0.05, 1.05)
-        ax.set_ylim(-0.05, 1.05)
-        ax.grid(True, linestyle='--', alpha=0.5)
+            # Format từng ô
+            ax.set_title(task_name, fontsize=20, fontweight='bold', pad=10)
+            ax.set_xticks([])
+            ax.set_yticks([])
+            for spine in ax.spines.values():
+                spine.set_edgecolor('#CCCCCC')
+                spine.set_linewidth(2)
 
+    # SAU KHI VẼ XONG 16 Ô, LƯU LẠI THÀNH 1 FILE DUY NHẤT
     plt.tight_layout()
+    # Dãn khoảng cách giữa các ô một chút cho thoáng
+    plt.subplots_adjust(wspace=0.1, hspace=0.15) 
     
-    # Lưu file với tên Epoch (tự động lấy từ tên file checkpoint)
-    epoch_name = os.path.basename(checkpoint_path).replace(".pt", "")
-    save_name = f"viz_{epoch_name}_seed{seed}.png"
-    
-    plt.savefig(save_name, dpi=300)
-    print(f">> Đã lưu ảnh: {save_name}")
-    # plt.show() # Tắt show nếu chạy trên server không màn hình
+    save_name = f"appendix_16_tasks_grid_size100.pdf"
+    plt.savefig(save_name, format='pdf', dpi=300, bbox_inches='tight')
+    plt.close(fig) 
+    print(f"\n>> ĐÃ XONG! Lưu toàn bộ 16 bài toán vào siêu phẩm: {save_name}")
 
 if __name__ == "__main__":
-    # CÁCH DÙNG:
-    # Chạy lần 1: Visualize Epoch 500
-    ##visualize_slots_fixed(CKPT_1, model_type="SlotDiffModel", seed=1234) # <--- Seed cố định
+    env_params = {
+        'problem_size': 100, 
+        'pomo_size': 100
+    }
     
-    # Chạy lần 2: Visualize Epoch 1000
-    #CKPT_2 = "./pretrained/SlotDIff/epoch-1000.pt"
-    #visualize_slots_fixed(CKPT_2, model_type="SlotDiffModel", seed=1234) # <--- Seed GIỐNG HỆT
-
-     CKPT_4 = "./pretrained/SlotDIff/epoch-4000.pt"
-     visualize_slots_fixed(CKPT_4, model_type="SlotDiffModel", seed=1234) # <--- Seed GIỐNG HỆT
+    base_model_params = {
+        'embedding_dim': 128, 
+        'sqrt_embedding_dim': 128**(1/2),
+        'encoder_layer_num': 6, 
+        'decoder_layer_num': 1,
+        'qkv_dim': 16, 
+        'head_num': 8, 
+        'logit_clipping': 10,
+        'ff_hidden_dim': 512, 
+        'eval_type': 'argmax',
+        'norm': 'instance', 
+        'norm_loc': 'norm_last', 
+        'problem': 'CVRP', # Kẻ thế mạng lúc khởi tạo
+        'num_experts': 4, 
+        'topk': 2, 
+        'expert_loc': ['Enc0', 'Enc1', 'Enc2', 'Enc3', 'Enc4', 'Enc5', 'Dec'], 
+        'routing_level': 'node', 
+        'routing_method': 'input_choice',
+        'slot_num': 32,
+        'slot_iter_num': 3,
+        'enable_slot_diffusion': True,
+        'max_timesteps': 1000,
+        'denoiser_heads': 4,
+        'denoiser_layers': 2,
+        'enable_slot_reconstruction': False,
+    } 
+    
+    checkpoint_dir = "./checkpoints" 
+    
+    # Chạy phát xả ra luôn 1 grid 4x4
+    plot_16_tasks_appendix(5000, checkpoint_dir, env_params, base_model_params)
